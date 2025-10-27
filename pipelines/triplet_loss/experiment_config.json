@@ -1,0 +1,19 @@
+{
+  "dataset": "C:\\Work\\TableUnifier\\datasets\\dataset_1000t_qwen3_8b_qwen3-embedding_8b",
+  "input_dim": 4096,
+  "output_dim": 4096,
+  "batch_size": 64,
+  "epochs": 10,
+  "learning_rate": 0.001,
+  "margin": 0.2,
+  "train_samples": 7283,
+  "val_samples": 1561,
+  "test_samples": 1561,
+  "best_val_loss": 0.14067021518945694,
+  "separability_original": 0.15025102466772988,
+  "separability_new": 0.8190692663192749,
+  "separability_improvement": 445.1338971768026,
+  "eer_original": 0.26616199413676056,
+  "eer_new": 0.03121969058425582,
+  "eer_improvement": 88.27041753819503
+}

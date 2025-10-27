@@ -1,0 +1,39 @@
+{
+    "ollama": {
+        "host": "http://127.0.0.1:11434",
+        "llm_model": "qwen3:8b",
+        "embedding_model": "embeddinggemma",
+        "timeout": 120
+    },
+    "embedding": {
+        "batch_size": 100,
+        "similarity_threshold": 0.5,
+        "include_data_types": true,
+        "sample_size": 3
+    },
+    "classifier": {
+        "update_alpha": 0.3,
+        "min_similarity": 0.6,
+        "auto_update": false
+    },
+    "dataset_generation": {
+        "num_tables": 1000,
+        "min_rows_per_table": 7,
+        "max_rows_per_table": 7,
+        "min_optional_columns": 3,
+        "max_optional_columns": 6,
+        "num_workers": 8,
+        "column_name_variation_level": 0.7,
+        "include_typos": true,
+        "include_abbreviations": true,
+        "include_translations": true,
+        "output_dir": "generated_dataset_v3",
+        "tables_dir": "tables",
+        "dataset_file": "dataset_v3.json",
+        "metadata_file": "metadata_v3.json",
+        "locales": [
+            "ru_RU",
+            "en_US"
+        ]
+    }
+}
