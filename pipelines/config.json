@@ -1,0 +1,196 @@
+{
+  "description": "Единый конфиг для всех пайплайнов TableUnifier (генерация данных → SM → ER → инференс)",
+
+  "data_generation": {
+    "ollama_host": "http://100.74.62.22:11434",
+    "llm_model": "qwen3.5:9b",
+    "embedding_model": "qwen3-embedding:8b",
+
+    "auto_batch_size": true,
+    "initial_batch_size": 8,
+    "max_batch_size": 512,
+    "min_batch_size": 1,
+    "keep_alive": "30m",
+    "num_predict": 150,
+    "num_ctx": 2048,
+    "warmup": true,
+
+    "locales": ["ru_RU", "en_US"],
+    "min_rows_per_table": 5,
+    "max_rows_per_table": 15,
+    "min_optional_columns": 2,
+    "max_optional_columns": 8,
+    "column_name_variation_level": 0.7,
+    "include_typos": true,
+    "include_abbreviations": true,
+    "sample_size": 5,
+
+    "num_entity_pool": 500,
+    "num_train_pairs": 300,
+    "num_val_pairs": 50,
+    "num_test_pairs": 50,
+    "min_common_entities": 3,
+    "max_common_entities": 8,
+    "min_unique_entities": 1,
+    "max_unique_entities": 5,
+    "perturbation_prob": 0.3,
+    "missing_value_prob": 0.1,
+
+    "num_extra_sm_tables": 200,
+
+    "extra_column_variants": {
+      "quantity": {
+        "ru": ["Штук", "Кол-во единиц", "Объём заказа", "К-во", "Число", "Объем поставки", "Факт. кол-во"],
+        "en": ["No. of items", "Order Qty", "Pcs", "Units", "Amount", "Volume"]
+      },
+      "base_price": {
+        "ru": ["Тариф", "Расценка", "Цена без НДС", "Прайс-лист", "Стоимость ед.", "Цена за ед.", "Учетная цена"],
+        "en": ["Rate", "Tariff", "Net Price", "Unit Price", "Base Rate", "Cost per Unit", "List Price"]
+      },
+      "product_name": {
+        "ru": ["Обозначение", "Описание позиции", "Спецификация", "Наименование ТМЦ", "Номенклатура", "Товар", "Название артикула"],
+        "en": ["Item Title", "Specification", "Part Description", "Product Name", "SKU Name", "Line Item", "Designation"]
+      }
+    },
+
+    "extra_product_groups": [
+      "Медикаменты", "Продукты питания", "Химреактивы",
+      "Спецодежда", "Запчасти", "Оборудование",
+      "Электрика", "Метизы", "Лакокрасочные материалы",
+      "ГСМ", "Расходные материалы", "IT-оборудование",
+      "СИЗ", "Кабельная продукция"
+    ],
+    "extra_units": [
+      "т", "м2", "м3", "рулон", "бухта", "палета", "коробка",
+      "пог. м", "комплект", "набор", "флакон", "блистер"
+    ],
+    "extra_manufacturers": [
+      "КАМАЗ", "Газпром", "Северсталь", "РУСАЛ", "ЛУКойл",
+      "ABB", "Schneider Electric", "Honeywell", "3M", "Makita",
+      "Hilti", "Legrand", "Danfoss", "Cisco", "Wilo"
+    ],
+    "extra_vat_rates": [0, 5, 7, 10, 20],
+    "extra_article_prefixes": [
+      "МАТ", "ОБР", "ЗАП", "КОМ", "СРВ",
+      "ИНВ", "ТОВ", "ПРОД", "ТЕХ", "ХИМ"
+    ],
+    "extra_product_name_parts": [
+      "Turbo", "Industrial", "Heavy-Duty", "Compact", "Eco",
+      "Professional", "Expert", "Lite", "Mini", "XL",
+      "Universal", "Reinforced", "Hybrid", "Digital", "Modular"
+    ],
+    "extra_countries": [
+      "Китай", "Россия", "Германия", "Турция", "Индия",
+      "Южная Корея", "Италия", "Япония", "Беларусь", "Казахстан",
+      "ОАЭ", "США", "Франция", "Тайвань", "Вьетнам"
+    ],
+    "extra_notes_templates": [
+      "Срочная поставка", "Под заказ", "Со склада",
+      "Требуется сертификат", "Гарантия 2 года",
+      "Только безнал", "Самовывоз", "Хрупкий груз",
+      "Требуется обрешетка", "Температурный режим",
+      "Аналоги не допускаются", "Частичная отгрузка"
+    ],
+
+    "custom_columns": {
+      "delivery_date": {
+        "description": "Дата поставки товара",
+        "variants": {
+          "ru": ["Дата поставки", "Дата доставки", "Срок поставки", "Планируемая дата", "Дата отгрузки"],
+          "en": ["Delivery Date", "Ship Date", "ETA", "Expected Date", "Shipping Date"]
+        },
+        "data_type": "str",
+        "values": [
+          "01.04.2026", "15.04.2026", "30.04.2026", "10.05.2026",
+          "По согласованию", "В течение 5 дней", "Немедленно", "По графику"
+        ],
+        "mandatory": false,
+        "entity_column": false
+      },
+      "warehouse": {
+        "description": "Склад хранения или отгрузки",
+        "variants": {
+          "ru": ["Склад", "Хранилище", "Место хранения", "Склад отгрузки", "Терминал"],
+          "en": ["Warehouse", "Storage", "Location", "Depot", "Stock Location"]
+        },
+        "data_type": "str",
+        "values": ["Склад-1", "Склад-2", "Центральный", "Филиал Юг", "Филиал Север", "Транзит", "Основной склад"],
+        "mandatory": false,
+        "entity_column": false
+      },
+      "warranty": {
+        "description": "Гарантийный срок товара",
+        "variants": {
+          "ru": ["Гарантия", "Гарантийный срок", "Срок гарантии", "Гарант."],
+          "en": ["Warranty", "Guarantee", "Warranty Period"]
+        },
+        "data_type": "str",
+        "values": ["12 мес.", "24 мес.", "36 мес.", "6 мес.", "Без гарантии", "1 год", "2 года", "3 года"],
+        "mandatory": false,
+        "entity_column": false
+      }
+    },
+
+    "output_dir": "unified_dataset",
+    "sm_dataset_file": "sm_dataset.json",
+    "sm_metadata_file": "sm_metadata.json",
+    "er_raw_dir": "raw"
+  },
+
+  "schema_matching": {
+    "projection_dims": [2048, 1024, 512],
+    "output_dim": 256,
+    "dropout": 0.1,
+    "use_batch_norm": true,
+
+    "batch_size": 64,
+    "learning_rate": 0.001,
+    "weight_decay": 1e-5,
+    "num_epochs": 30,
+    "margin": 0.2,
+    "mining_strategy": "semihard",
+    "scheduler_patience": 5,
+    "early_stopping_patience": 10,
+    "train_ratio": 0.7,
+    "val_ratio": 0.15,
+    "test_ratio": 0.15,
+
+    "similarity_threshold": 0.6,
+    "model_dir": "sm_models"
+  },
+
+  "entity_resolution": {
+    "fasttext_model_path": "cc.ru.300.bin",
+    "token_embed_dim": 300,
+
+    "min_token_length": 2,
+    "max_token_length": 50,
+    "max_token_doc_freq": 0.8,
+    "cell_separator": " | ",
+
+    "hidden_dim": 256,
+    "edge_dim": 128,
+    "num_gnn_layers": 2,
+    "num_heads": 4,
+    "dropout": 0.1,
+    "use_jumping_knowledge": true,
+    "output_dim": 128,
+
+    "batch_size": 16,
+    "learning_rate": 0.001,
+    "weight_decay": 1e-5,
+    "num_epochs": 50,
+    "margin": 0.3,
+    "mining_strategy": "semihard",
+    "scheduler_patience": 5,
+    "early_stopping_patience": 10,
+
+    "graphs_dir": "er_graphs",
+    "model_dir": "er_models"
+  },
+
+  "inference": {
+    "sm_similarity_threshold": 0.6,
+    "er_similarity_threshold": 0.7
+  }
+}

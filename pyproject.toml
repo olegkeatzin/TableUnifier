@@ -42,6 +42,9 @@ dependencies = [
     "torchvision>=0.23.0",
     "pytorch-metric-learning>=2.9.0",
     "faiss-cpu>=1.12.0",
+    "ipywidgets>=8.1.8",
+    "gensim>=4.4.0",
+    "pytest>=8.4.2",
 ]
 
 [project.optional-dependencies]
@@ -56,25 +59,26 @@ dev = [
 generation = [
     "faker>=18.0.0",
 ]
+er = [
+    "torch-geometric>=2.5.0",
+    "gensim>=4.3.0",
+    "faker>=18.0.0",
+]
 all = [
-    "table-unifier[dev,generation]",
+    "table-unifier[dev,generation,er]",
 ]
 
 [project.urls]
 Homepage = "https://github.com/olegkeatzin/TableUnifier"
 Repository = "https://github.com/olegkeatzin/TableUnifier"
-Documentation = "https://github.com/olegkeatzin/TableUnifier/blob/master/README.md"
+Documentation = "https://github.com/olegkeatzin/TableUnifier/blob/main/README.md"
 "Bug Tracker" = "https://github.com/olegkeatzin/TableUnifier/issues"
 
 [project.scripts]
-table-unifier = "table_unifier.cli:main"
+table-unifier = "table_unifier.__main__:main"
 
-[tool.setuptools]
-packages = ["table_unifier"]
-package-dir = {"" = "src"}
-
-[tool.setuptools.package-data]
-table_unifier = ["configs/*.json"]
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [tool.black]
 line-length = 100

@@ -2,16 +2,81 @@
 Конфигурационный файл для системы унификации таблиц
 """
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, List
 import json
+import logging
+
+logger = logging.getLogger(__name__)
+
+# ═══════════════ Реестр размерностей embedding-моделей ═══════════════
+
+EMBEDDING_MODEL_DIMS: dict[str, int] = {
+    "qwen3-embedding:8b": 4096,
+    "embeddinggemma": 768,
+    "nomic-embed-text": 768,
+    "mxbai-embed-large": 1024,
+    "snowflake-arctic-embed": 1024,
+    "all-minilm": 384,
+}
+"""Известные embedding-модели и размерности их выходных векторов."""
+
+
+def get_embedding_dim(model_name: str) -> int:
+    """Получить размерность эмбеддинга по имени модели.
+    
+    Args:
+        model_name: Имя Ollama embedding модели
+        
+    Returns:
+        Размерность вектора эмбеддинга
+        
+    Raises:
+        ValueError: Если модель неизвестна
+    """
+    if model_name in EMBEDDING_MODEL_DIMS:
+        return EMBEDDING_MODEL_DIMS[model_name]
+    
+    # Проверяем по базовому имени (без тега, e.g. "qwen3-embedding" для "qwen3-embedding:8b")
+    base_name = model_name.split(":")[0]
+    for known, dim in EMBEDDING_MODEL_DIMS.items():
+        if known.split(":")[0] == base_name:
+            logger.warning(
+                f"Точное совпадение для '{model_name}' не найдено, "
+                f"используется '{known}' → {dim}"
+            )
+            return dim
+    
+    raise ValueError(
+        f"Неизвестная embedding модель: '{model_name}'. "
+        f"Известные модели: {list(EMBEDDING_MODEL_DIMS.keys())}. "
+        f"Добавьте модель в EMBEDDING_MODEL_DIMS или задайте input_dim вручную."
+    )
+
+
+def get_default_projection_dims(input_dim: int, output_dim: int = 256) -> List[int]:
+    """Автоматический расчёт размерностей projection head.
+    
+    Поэтапное уменьшение в 2 раза от input_dim до output_dim.
+    
+    Примеры:
+        4096, 256 → [2048, 1024, 512]
+        768, 256  → [384]
+        1024, 256 → [512]
+    """
+    dims = []
+    d = input_dim
+    while d // 2 > output_dim:
+        d = d // 2
+        dims.append(d)
+    return dims if dims else [(input_dim + output_dim) // 2]
 
 
 @dataclass
 class OllamaConfig:
     """Конфигурация подключения к Ollama"""
     host: str = "http://localhost:11434"
-    llm_model: str = "gemma3:1b"
-    embedding_model: str = "embeddinggemma"
+    llm_model: str = "qwen3.5:9b"
+    embedding_model: str = "qwen3-embedding:8b"
     timeout: int = 120  # секунды
     
 
@@ -33,36 +98,16 @@ class ClassifierConfig:
 
 
 @dataclass
-class DatasetGenerationConfig:
-    """Конфигурация генерации датасета"""
-    num_tables: int = 500
-    min_rows_per_table: int = 5
-    max_rows_per_table: int = 20
-    min_optional_columns: int = 2  # Минимум дополнительных столбцов
-    max_optional_columns: int = 8  # Максимум дополнительных столбцов (всего 8 опциональных)
-    num_workers: int = 16  # Количество параллельных потоков
-    column_name_variation_level: float = 0.7
-    include_typos: bool = True
-    include_abbreviations: bool = True
-    include_translations: bool = True
-    output_dir: str = "generated_dataset_v3"
-    tables_dir: str = "tables"
-    dataset_file: str = "dataset_v3.json"
-    metadata_file: str = "metadata_v3.json"
-    locales: list = None
-    
-    def __post_init__(self):
-        if self.locales is None:
-            self.locales = ["ru_RU", "en_US"]
-    
-
-@dataclass
 class AppConfig:
-    """Главная конфигурация приложения"""
+    """Конфигурация приложения для TableUnifier (column embedding pipeline).
+    
+    Используется модулем core.py (TableUnifier) для подключения к Ollama
+    и настройки обработки столбцов. Специализированные конфиги для SM и ER
+    находятся в соответствующих подмодулях.
+    """
     ollama: OllamaConfig = None
     embedding: EmbeddingConfig = None
     classifier: ClassifierConfig = None
-    dataset_generation: DatasetGenerationConfig = None
     
     def __post_init__(self):
         if self.ollama is None:
@@ -71,8 +116,6 @@ class AppConfig:
             self.embedding = EmbeddingConfig()
         if self.classifier is None:
             self.classifier = ClassifierConfig()
-        if self.dataset_generation is None:
-            self.dataset_generation = DatasetGenerationConfig()
     
     @classmethod
     def from_file(cls, filepath: str) -> 'AppConfig':
@@ -84,7 +127,6 @@ class AppConfig:
             ollama=OllamaConfig(**data.get('ollama', {})),
             embedding=EmbeddingConfig(**data.get('embedding', {})),
             classifier=ClassifierConfig(**data.get('classifier', {})),
-            dataset_generation=DatasetGenerationConfig(**data.get('dataset_generation', {}))
         )
     
     def to_file(self, filepath: str):
@@ -93,11 +135,6 @@ class AppConfig:
             'ollama': self.ollama.__dict__,
             'embedding': self.embedding.__dict__,
             'classifier': self.classifier.__dict__,
-            'dataset_generation': self.dataset_generation.__dict__
         }
         with open(filepath, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
-
-
-# Конфигурация по умолчанию
-DEFAULT_CONFIG = AppConfig()

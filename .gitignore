@@ -57,10 +57,10 @@ dmypy.json
 .ipynb_checkpoints/
 */.ipynb_checkpoints/*
 
-# Generated datasets and tables
-datasets/
-generated_invoices/
-generated_dataset_v3/
+# Generated datasets (all output dirs)
+er_dataset/
+unified_dataset/
+sm_dataset/
 
 # Model weights and checkpoints
 *.pth
@@ -70,21 +70,14 @@ generated_dataset_v3/
 *.pt
 *.ckpt
 *.safetensors
-*.pkl
 
-# Images
-
-!pipelines/triplet_loss/*.png
-
+# Images (pipeline outputs)
+*.png
 
 # Logs
 *.log
 logs/
 *.out
-
-# Configuration (keep examples)
-project_config.json
-!project_config.example.json
 
 # Cache files
 .cache/
@@ -97,6 +90,8 @@ site/
 # OS specific
 .DS_Store
 Thumbs.db
+
+# Lock files
 *.lock
 uv.lock
 
