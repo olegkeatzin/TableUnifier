@@ -6,8 +6,10 @@ PyTorch Dataset для Entity Resolution.
 2. Построение графов из пар таблиц + FastText эмбеддинги + column embeddings
 3. Правильный collate для батчирования HeteroData графов
 4. Сдвиг entity_labels между графами в батче (чтобы метки не пересекались)
+5. Загрузку pre-computed raw embeddings из SM датасета (избегает повторных LLM/Ollama вызовов)
 """
 
+import json
 import os
 import torch
 import numpy as np
@@ -162,6 +164,109 @@ def precompute_column_embeddings(
     
     for key, emb in zip(keys, projected):
         cache[key] = emb
+    
+    return cache
+
+
+def load_and_project_column_cache(
+    pairs: List[TablePairData],
+    pair_table_ids: List[tuple],
+    sm_dataset_path: str,
+    sm_inference,
+) -> Dict[str, np.ndarray]:
+    """Загрузить raw embeddings из SM датасета и спроецировать через SM модель.
+    
+    Вместо повторной генерации LLM-описаний и Ollama-эмбеддингов (как делает
+    precompute_column_embeddings), загружает уже готовые raw embeddings
+    из sm_dataset.json (Pipeline 01) и только проецирует через обученную
+    ProjectionHead SM модели.
+    
+    Поиск столбца в SM датасете работает в два прохода:
+    1. Точный: по (table_id, col_name) — работает если meta.json содержит
+       table_id_a/table_id_b (датасет сгенерирован текущей версией pipeline 01)
+    2. Fallback: по cache_key из (col_name + content_sample[:5]) — работает
+       с любым существующим датасетом без перегенерации
+    
+    Args:
+        pairs: Список пар таблиц (загруженных из CSV)
+        pair_table_ids: Список (table_id_a, table_id_b) для каждой пары
+                        (из meta.json; -1 если table_id не сохранён)
+        sm_dataset_path: Путь к sm_dataset.json
+        sm_inference: SchemaMatcherInference instance (для проекции)
+    
+    Returns:
+        Dict {cache_key: np.ndarray projected_embedding} — готовый col_cache
+        для передачи в build_and_save_graphs
+    """
+    # 1. Загрузка SM датасета
+    with open(sm_dataset_path, 'r', encoding='utf-8') as f:
+        sm_data = json.load(f)
+    
+    # Два lookup-а: точный (table_id, col_name) и fallback (cache_key)
+    sm_by_tid: Dict[tuple, np.ndarray] = {}
+    sm_by_cache_key: Dict[str, np.ndarray] = {}
+    for entry in sm_data:
+        raw_emb = np.array(entry['embedding'], dtype=np.float32)
+        sm_by_tid[(entry['table_id'], entry['column_name'])] = raw_emb
+        ck = _column_cache_key(entry['column_name'], entry.get('content_sample', []))
+        # Первое вхождение по cache_key выигрывает (как в precompute_column_embeddings)
+        sm_by_cache_key.setdefault(ck, raw_emb)
+    
+    logger.info(f"SM датасет загружен: {len(sm_data)} записей")
+    
+    # 2. Для каждого уникального столбца находим raw embedding
+    cache_keys = []
+    raw_embeddings = []
+    seen_keys: set = set()
+    found_by_tid = 0
+    found_by_fallback = 0
+    missing = 0
+    
+    for pair, (tid_a, tid_b) in zip(pairs, pair_table_ids):
+        for df, tid in [(pair.df_a, tid_a), (pair.df_b, tid_b)]:
+            for col in df.columns:
+                content = df[col].dropna().tolist()[:5]
+                cache_key = _column_cache_key(col, content)
+                
+                if cache_key in seen_keys:
+                    continue
+                seen_keys.add(cache_key)
+                
+                # Точный поиск по table_id
+                raw_emb = sm_by_tid.get((tid, col)) if tid != -1 else None
+                if raw_emb is not None:
+                    found_by_tid += 1
+                else:
+                    # Fallback: поиск по (col_name + content)
+                    raw_emb = sm_by_cache_key.get(cache_key)
+                    if raw_emb is not None:
+                        found_by_fallback += 1
+                    else:
+                        missing += 1
+                        logger.warning(f"Column '{col}' (table_id={tid}) не найден в SM датасете")
+                        continue
+                
+                cache_keys.append(cache_key)
+                raw_embeddings.append(raw_emb)
+    
+    logger.info(
+        f"Столбцов найдено: {found_by_tid} по table_id, "
+        f"{found_by_fallback} по content fallback, {missing} не найдено"
+    )
+    
+    if not raw_embeddings:
+        logger.warning("Нет raw embeddings для проекции!")
+        return {}
+    
+    # 3. Проекция через SM модель (быстрая локальная операция, без Ollama)
+    raw_array = np.stack(raw_embeddings)
+    projected = sm_inference._project_embeddings(raw_array)
+    
+    cache = {}
+    for key, emb in zip(cache_keys, projected):
+        cache[key] = emb
+    
+    logger.info(f"Column cache построен: {len(cache)} столбцов (raw → SM projection, без LLM/Ollama)")
     
     return cache
 

@@ -81,6 +81,7 @@ class UnifiedDatasetGenerator:
         self.sm_entries: List[Dict] = []
         self.sm_metadata: List[Dict] = []
         self.er_pairs: Dict[str, List[TablePairData]] = {}
+        self._er_pair_table_ids: Dict[str, List[Tuple[int, int]]] = {}
         
         logger.info(f"UnifiedDatasetGenerator инициализирован")
         logger.info(f"  LLM: {config.llm_model}")
@@ -143,6 +144,7 @@ class UnifiedDatasetGenerator:
             ]:
                 logger.info(f"Генерация ER пар: {split} ({n_pairs})")
                 pairs = []
+                pair_tids = []
                 for i in tqdm(range(n_pairs), desc=f"ER {split}"):
                     if self.interrupted:
                         break
@@ -150,21 +152,25 @@ class UnifiedDatasetGenerator:
                         pair = self.table_gen.generate_er_pair(entity_pool)
                         pairs.append(pair)
                         
+                        tid_a = table_id_counter
                         # Таблицы для SM обработки
                         all_tables.append((
                             pair.df_a, pair.column_mapping_a,
                             table_id_counter, f"er_{split}"
                         ))
                         table_id_counter += 1
+                        tid_b = table_id_counter
                         all_tables.append((
                             pair.df_b, pair.column_mapping_b,
                             table_id_counter, f"er_{split}"
                         ))
                         table_id_counter += 1
+                        pair_tids.append((tid_a, tid_b))
                     except Exception as e:
                         logger.error(f"Ошибка генерации ER пары {i} ({split}): {e}")
                 
                 self.er_pairs[split] = pairs
+                self._er_pair_table_ids[split] = pair_tids
                 if self.interrupted:
                     break
             
@@ -434,10 +440,17 @@ class UnifiedDatasetGenerator:
         logger.info(f"SM метаданные: {meta_path}")
     
     def _save_er_data(self):
-        """Сохранить ER данные: CSV пары + meta.json по сплитам."""
+        """Сохранить ER данные: CSV пары + meta.json по сплитам.
+        
+        Также сохраняет table_id_a/table_id_b для связи с SM датасетом,
+        чтобы pipeline 03 мог загрузить готовые raw embeddings столбцов
+        вместо повторного вызова LLM + Ollama.
+        """
         for split, pairs in self.er_pairs.items():
             if not pairs:
                 continue
+            
+            pair_tids = self._er_pair_table_ids.get(split, [])
             
             split_dir = os.path.join(
                 self.config.output_dir, self.config.er_raw_dir, split
@@ -457,6 +470,9 @@ class UnifiedDatasetGenerator:
                     index=False, encoding='utf-8'
                 )
                 
+                # table_ids из SM датасета
+                tid_a, tid_b = pair_tids[i] if i < len(pair_tids) else (-1, -1)
+                
                 # Метаданные пары
                 meta = {
                     'pair_id': i,
@@ -469,6 +485,8 @@ class UnifiedDatasetGenerator:
                     'num_rows_a': len(pair.df_a),
                     'num_rows_b': len(pair.df_b),
                     'num_duplicates': len(pair.duplicate_pairs),
+                    'table_id_a': tid_a,
+                    'table_id_b': tid_b,
                 }
                 with open(
                     os.path.join(split_dir, f"{prefix}_meta.json"),
