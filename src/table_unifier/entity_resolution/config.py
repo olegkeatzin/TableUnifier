@@ -142,6 +142,9 @@ class ERConfig:
     
     graphs_dir: str = "graphs"
     """Поддиректория для сохранённых графов (.pt)"""
+
+    sm_model_path: str = "sm_models/best_model.pt"
+    """Path to trained SM model for column embeddings (triplet loss projection)"""
     
     def save(self, filepath: str):
         """Сохранить конфигурацию в JSON"""

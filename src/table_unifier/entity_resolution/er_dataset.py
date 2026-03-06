@@ -21,10 +21,7 @@ except ImportError:
     raise ImportError("PyTorch Geometric не установлен! pip install torch-geometric")
 
 from .config import ERConfig
-from .graph_builder import (
-    TablePairGraphBuilder,
-    compute_column_embeddings,
-)
+from .graph_builder import TablePairGraphBuilder
 from .token_embedder import FastTextEmbedder
 from .er_data_generator import TablePairData
 
@@ -112,8 +109,7 @@ def _column_cache_key(col_name: str, content_sample: list) -> str:
 
 def precompute_column_embeddings(
     pairs: List[TablePairData],
-    unifier,
-    config: ERConfig,
+    sm_inference,
 ) -> Dict[str, np.ndarray]:
     """Предвычислить column embeddings для всех уникальных столбцов во всех парах.
     
@@ -127,7 +123,7 @@ def precompute_column_embeddings(
     
     Args:
         pairs: Список пар таблиц (или объединённый список из всех сплитов)
-        unifier: TableUnifier instance
+        sm_inference: SchemaMatcherInference instance
         config: Конфигурация ER
     
     Returns:
@@ -151,21 +147,21 @@ def precompute_column_embeddings(
         f"(из ~{sum(len(p.df_a.columns) + len(p.df_b.columns) for p in pairs)} всего)"
     )
     
-    # 2. Вычисляем embeddings для уникальных столбцов через unifier
+    # 2. Генерируем описания и получаем проецированные эмбеддинги через SM
     cache: Dict[str, np.ndarray] = {}
     keys = list(unique_columns.keys())
     
-    # Batch обработка: собираем все столбцы в один DataFrame-like вызов
-    columns_data = []
+    descriptions = []
     for key in keys:
         col_name, content, data_type = unique_columns[key]
-        columns_data.append((col_name, content, data_type))
+        desc = sm_inference._generate_description(col_name, content, data_type)
+        descriptions.append(desc)
     
-    # Обрабатываем через batch_processor напрямую
-    results = unifier.batch_processor.process_columns_batch(columns_data)
+    # Batch: raw Qwen3 embeddings -> SM projection (triplet loss проекция)
+    projected = sm_inference.compute_column_embeddings_raw(descriptions)
     
-    for key, result in zip(keys, results):
-        cache[key] = result['embedding']
+    for key, emb in zip(keys, projected):
+        cache[key] = emb
     
     return cache
 
@@ -190,7 +186,7 @@ def build_and_save_graphs(
     pairs: List[TablePairData],
     config: ERConfig,
     output_dir: str,
-    unifier=None,
+    sm_inference=None,
     fasttext_embedder: Optional[FastTextEmbedder] = None,
     progress_callback: Optional[Callable] = None,
     skip_existing: bool = True,
@@ -199,7 +195,7 @@ def build_and_save_graphs(
     """Построить графы из пар таблиц и сохранить на диск.
     
     Этот метод выполняет:
-    1. Для каждой пары таблиц вычисляет column embeddings через TableUnifier
+    1. Для каждой пары таблиц вычисляет column embeddings через SM inference
     2. Вычисляет token embeddings (предобученный FastText) и row embeddings (BoW)
     3. Строит HeteroData граф
     4. Сохраняет как .pt файл
@@ -215,7 +211,7 @@ def build_and_save_graphs(
         pairs: Список пар таблиц (из ERTablePairGenerator)
         config: Конфигурация ER
         output_dir: Директория для сохранения .pt файлов
-        unifier: TableUnifier instance (если None — создаётся из config)
+        sm_inference: SchemaMatcherInference instance (если None — создаётся из config)
         fasttext_embedder: FastTextEmbedder instance (если None — создаётся из config)
         progress_callback: Callable(i, total) для отслеживания прогресса
         skip_existing: Пропускать ли уже существующие .pt файлы
@@ -226,8 +222,8 @@ def build_and_save_graphs(
         Число успешно созданных графов
     """
     import time as _time
-    from ..core import TableUnifier
-    from ..config import AppConfig
+    from ..schema_matching.config import SMConfig
+    from ..schema_matching.inference import SchemaMatcherInference
     
     os.makedirs(output_dir, exist_ok=True)
     
@@ -235,13 +231,16 @@ def build_and_save_graphs(
     if fasttext_embedder is None:
         fasttext_embedder = FastTextEmbedder(config.fasttext_model_path)
     
-    if unifier is None:
-        app_config = AppConfig()
-        app_config.ollama.host = config.ollama_host
-        app_config.ollama.embedding_model = config.embedding_model
-        app_config.ollama.llm_model = config.llm_model
-        app_config.embedding.batch_size = config.embedding_batch_size
-        unifier = TableUnifier(app_config)
+    if sm_inference is None:
+        sm_config = SMConfig(
+            ollama_host=config.ollama_host,
+            embedding_model=config.embedding_model,
+            llm_model=config.llm_model,
+        )
+        sm_inference = SchemaMatcherInference(
+            model_path=config.sm_model_path,
+            config=sm_config,
+        )
     
     graph_builder = TablePairGraphBuilder(config, fasttext_embedder)
     
@@ -269,7 +268,7 @@ def build_and_save_graphs(
     if col_cache is None:
         t0 = _time.time()
         pairs_for_cache = [pair for _, pair in pairs_to_build]
-        col_cache = precompute_column_embeddings(pairs_for_cache, unifier, config)
+        col_cache = precompute_column_embeddings(pairs_for_cache, sm_inference)
         t_col = _time.time() - t0
         logger.info(f"Column embeddings предвычислены за {t_col:.1f}с")
     else:

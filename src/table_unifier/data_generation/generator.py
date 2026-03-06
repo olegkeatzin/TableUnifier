@@ -37,6 +37,7 @@ from .columns import (
     TableGenerator,
     EntityPool,
     TablePairData,
+    COLUMN_TEMPLATES,
 )
 from .ollama_utils import OllamaAccelerator
 
@@ -109,7 +110,7 @@ class UnifiedDatasetGenerator:
         try:
             # ═══ Этап 1: Прогрев и калибровка ═══
             logger.info("\n" + "═" * 70)
-            logger.info("ЭТАП 1: Прогрев моделей и калибровка batch_size")
+            logger.info("ЭТАП 1: Прогрев моделей и калибровка batch_size / llm_parallel")
             logger.info("═" * 70)
             
             if self.config.warmup:
@@ -117,6 +118,9 @@ class UnifiedDatasetGenerator:
             
             if self.config.auto_batch_size:
                 self.accelerator.calibrate_batch_size()
+            
+            if self.config.auto_llm_parallel:
+                self.accelerator.calibrate_llm_parallel()
             
             embed_dim = self.accelerator.get_embedding_dim()
             logger.info(f"Размерность эмбеддингов: {embed_dim}")
@@ -210,7 +214,7 @@ class UnifiedDatasetGenerator:
         
         Оптимизация:
         1. Собираем ВСЕ столбцы из всех таблиц
-        2. Генерируем описания через LLM (параллельно)
+        2. Дедуплицируем по (display_name, data_type) — LLM вызывается один раз на уникальную пару
         3. Batch embed всех описаний за один проход
         """
         # 1. Собираем информацию о всех столбцах
@@ -234,13 +238,38 @@ class UnifiedDatasetGenerator:
         if not column_entries:
             return
         
-        # 2. Генерация промптов для LLM
-        prompts = []
-        for table_id, display_name, base_name, content, data_type, source in column_entries:
+        # 2. Дедупликация: LLM вызывается только для уникальных (display_name, data_type)
+        unique_key_to_content = {}  # (display_name, data_type) -> первый встреченный content
+        unique_key_to_basenames: Dict[Tuple, str] = {}  # (display_name, data_type) -> base_name
+        for _, display_name, base_name, content, data_type, _ in column_entries:
+            key = (display_name, data_type)
+            if key not in unique_key_to_content:
+                unique_key_to_content[key] = content
+                unique_key_to_basenames[key] = base_name
+        
+        unique_keys = list(unique_key_to_content.keys())
+        saved = total_cols - len(unique_keys)
+        logger.info(f"Уникальных (display_name, data_type): {len(unique_keys)} "
+                    f"(экономия {saved} LLM вызовов, "
+                    f"{saved / total_cols * 100:.1f}%)")
+        
+        # 3. Генерация промптов только для уникальных пар
+        unique_prompts = []
+        for display_name, data_type in unique_keys:
+            content = unique_key_to_content[(display_name, data_type)]
             sample = content[:self.config.sample_size]
             type_info = f" Тип данных: {data_type}." if data_type else ""
+            base_name = unique_key_to_basenames.get((display_name, data_type))
+            canonical_desc = (
+                COLUMN_TEMPLATES.get(base_name, {}).get('description', '')
+                if base_name else ''
+            )
+            context_hint = (
+                f" Семантика столбца: {canonical_desc}."
+                if canonical_desc else ""
+            )
             prompt = (
-                f"Дай краткое описание для столбца таблицы с названием '{display_name}'.{type_info}\n"
+                f"Дай краткое описание для столбца таблицы с названием '{display_name}'.{type_info}{context_hint}\n"
                 f"Если по названию не понятно, что это за столбец, попробуй угадать на основе "
                 f"содержимого: {sample}.\n"
                 f"Описание должно быть универсальным, чтобы подходить для любых значений в этом столбце.\n"
@@ -248,33 +277,76 @@ class UnifiedDatasetGenerator:
                 f"разнообразные данные.\n"
                 f"Выведи только описание и ничего больше. /no_think"
             )
-            prompts.append(prompt)
+            unique_prompts.append(prompt)
         
-        # 3. Последовательная LLM генерация описаний
-        logger.info("Генерация описаний через LLM (последовательно)...")
+        # 4. LLM генерация только уникальных описаний (с кэшем на диске для возобновления)
+        desc_cache_path = os.path.join(self.config.output_dir, 'llm_desc_cache.json')
+        desc_cache: Dict = {}
         
-        descriptions = []
-        batch_size_llm = 100  # обрабатываем LLM бата по 100 за раз для прогресса
+        if os.path.exists(desc_cache_path):
+            try:
+                with open(desc_cache_path, 'r', encoding='utf-8') as f:
+                    raw = json.load(f)
+                # Формат: [[display_name, data_type, description], ...]
+                desc_cache = {(row[0], row[1]): row[2] for row in raw}
+                logger.info(f"Загружен кэш LLM описаний: {len(desc_cache)} записей из {desc_cache_path}")
+            except Exception as e:
+                logger.warning(f"Не удалось загрузить кэш описаний: {e}")
+                desc_cache = {}
         
-        with tqdm(total=total_cols, desc="LLM описания") as pbar:
-            def _llm_progress(done, total):
-                pbar.update(1)
+        missing_keys = [k for k in unique_keys if k not in desc_cache]
+        
+        if missing_keys:
+            missing_prompts = []
+            for display_name, data_type in missing_keys:
+                content = unique_key_to_content[(display_name, data_type)]
+                sample = content[:self.config.sample_size]
+                type_info = f" Тип данных: {data_type}." if data_type else ""
+                missing_prompts.append(
+                    f"Дай краткое описание для столбца таблицы с названием '{display_name}'.{type_info}\n"
+                    f"Если по названию не понятно, что это за столбец, попробуй угадать на основе "
+                    f"содержимого: {sample}.\n"
+                    f"Описание должно быть универсальным, чтобы подходить для любых значений в этом столбце.\n"
+                    f"Если столбец описывает что-то конкретное, думай шире - в столбце могут быть более "
+                    f"разнообразные данные.\n"
+                    f"Выведи только описание и ничего больше. /no_think"
+                )
             
-            for i in range(0, len(prompts), batch_size_llm):
-                if self.interrupted:
-                    break
-                batch_prompts = prompts[i:i + batch_size_llm]
-                batch_descs = self.accelerator.generate_descriptions_batch(
-                    batch_prompts,
+            logger.info(f"Генерация описаний через LLM "
+                        f"(num_parallel={self.accelerator.llm_num_parallel}, "
+                        f"уникальных пар: {len(missing_prompts)})...")
+            
+            with tqdm(total=len(missing_prompts), desc="LLM описания") as pbar:
+                def _llm_progress(done, total):
+                    pbar.update(1)
+                
+                new_descriptions = self.accelerator.generate_descriptions_batch(
+                    missing_prompts,
                     progress_callback=_llm_progress,
                 )
-                descriptions.extend(batch_descs)
+            
+            for key, desc in zip(missing_keys, new_descriptions):
+                desc_cache[key] = desc
+            
+            # Сохраняем кэш на диск — защита от повторного LLM при сбое embedding
+            try:
+                os.makedirs(self.config.output_dir, exist_ok=True)
+                with open(desc_cache_path, 'w', encoding='utf-8') as f:
+                    json.dump(
+                        [[k[0], k[1], v] for k, v in desc_cache.items()],
+                        f, ensure_ascii=False, indent=2,
+                    )
+                logger.info(f"Кэш LLM описаний сохранён: {desc_cache_path}")
+            except Exception as e:
+                logger.warning(f"Не удалось сохранить кэш описаний: {e}")
+        else:
+            logger.info(f"Все {len(unique_keys)} описаний уже есть в кэше, LLM пропускается")
         
-        # Формируем полные описания: "display_name: LLM_description"
+        # Формируем полные описания для всех столбцов из кэша
         full_descriptions = []
-        for idx, (entry, desc) in enumerate(zip(column_entries, descriptions)):
-            display_name = entry[1]
-            content = entry[3]
+        for _, display_name, _, content, data_type, _ in column_entries:
+            key = (display_name, data_type)
+            desc = desc_cache.get(key, "")
             if desc:
                 full_desc = f"{display_name}: {desc}"
             else:

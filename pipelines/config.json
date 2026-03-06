@@ -2,7 +2,7 @@
   "description": "Единый конфиг для всех пайплайнов TableUnifier (генерация данных → SM → ER → инференс)",
 
   "data_generation": {
-    "ollama_host": "http://100.74.62.22:11434",
+    "ollama_host": "http://127.0.0.1:11434",
     "llm_model": "qwen3.5:9b",
     "embedding_model": "qwen3-embedding:8b",
 
@@ -15,9 +15,14 @@
     "num_ctx": 2048,
     "warmup": true,
 
+    "auto_llm_parallel": true,
+    "max_llm_parallel": 16,
+    "min_llm_parallel": 1,
+    "initial_llm_parallel": 1,
+
     "locales": ["ru_RU", "en_US"],
-    "min_rows_per_table": 5,
-    "max_rows_per_table": 15,
+    "min_rows_per_table": 25,
+    "max_rows_per_table": 60,
     "min_optional_columns": 2,
     "max_optional_columns": 8,
     "column_name_variation_level": 0.7,
@@ -25,14 +30,14 @@
     "include_abbreviations": true,
     "sample_size": 5,
 
-    "num_entity_pool": 500,
+    "num_entity_pool": 3000,
     "num_train_pairs": 300,
     "num_val_pairs": 50,
     "num_test_pairs": 50,
     "min_common_entities": 3,
     "max_common_entities": 8,
-    "min_unique_entities": 1,
-    "max_unique_entities": 5,
+    "min_unique_entities": 15,
+    "max_unique_entities": 45,
     "perturbation_prob": 0.3,
     "missing_value_prob": 0.1,
 
@@ -160,7 +165,7 @@
   },
 
   "entity_resolution": {
-    "fasttext_model_path": "cc.ru.300.bin",
+    "fasttext_model_path": "../cc.ru.300.bin",
     "token_embed_dim": 300,
 
     "min_token_length": 2,

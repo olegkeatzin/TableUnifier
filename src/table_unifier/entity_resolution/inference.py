@@ -5,7 +5,7 @@
 между двумя таблицами с произвольными схемами.
 
 Pipeline:
-    1. Получить column embeddings (TableUnifier / курсовой проект)
+    1. Получить column embeddings (SchemaMatcherInference (SM) / курсовой проект)
     2. Построить граф из пары таблиц (FastText для токенов, BoW для строк)
     3. Forward pass через обученную GNN
     4. Сравнить row embeddings из таблицы A и B
@@ -130,7 +130,7 @@ class DuplicateDetector:
         df_b: pd.DataFrame,
         threshold: float = 0.7,
         top_k: int = None,
-        unifier=None,
+        sm_inference=None,
     ) -> List[DuplicateMatch]:
         """Найти дубликаты строк между двумя таблицами.
         
@@ -139,28 +139,31 @@ class DuplicateDetector:
             df_b: Вторая таблица
             threshold: Минимальное косинусное сходство для считания дубликатом
             top_k: Вернуть только top-K лучших совпадений (None = все выше threshold)
-            unifier: TableUnifier (если None — создаётся из config)
+            sm_inference: SchemaMatcherInference (если None — создаётся из config)
             
         Returns:
             Список DuplicateMatch, отсортированный по убыванию similarity
         """
         # Ленивый импорт для инженерии зависимостей
-        from ..core import TableUnifier
-        from ..config import AppConfig
+        from ..schema_matching.config import SMConfig
+        from ..schema_matching.inference import SchemaMatcherInference
         
-        # Инициализация unifier (для column embeddings)
-        if unifier is None:
-            app_config = AppConfig()
-            app_config.ollama.host = self.config.ollama_host
-            app_config.ollama.embedding_model = self.config.embedding_model
-            app_config.ollama.llm_model = self.config.llm_model
-            app_config.embedding.batch_size = self.config.embedding_batch_size
-            unifier = TableUnifier(app_config)
+        # Инициализация SM inference (для column embeddings)
+        if sm_inference is None:
+            sm_config = SMConfig(
+                ollama_host=self.config.ollama_host,
+                embedding_model=self.config.embedding_model,
+                llm_model=self.config.llm_model,
+            )
+            sm_inference = SchemaMatcherInference(
+                model_path=self.config.sm_model_path,
+                config=sm_config,
+            )
         
         # 1. Column embeddings (через LLM + Ollama embed)
         logger.info("Вычисление column embeddings...")
-        col_emb_a = compute_column_embeddings(df_a, unifier)
-        col_emb_b = compute_column_embeddings(df_b, unifier)
+        col_emb_a = compute_column_embeddings(df_a, sm_inference)
+        col_emb_b = compute_column_embeddings(df_b, sm_inference)
         
         # 2. Построение графа (row embeddings = BoW из FastText, вычисляется внутри)
         logger.info("Построение графа (FastText BoW)...")

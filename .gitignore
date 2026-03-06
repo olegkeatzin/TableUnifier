@@ -70,6 +70,7 @@ sm_dataset/
 *.pt
 *.ckpt
 *.safetensors
+*.bin
 
 # Images (pipeline outputs)
 *.png

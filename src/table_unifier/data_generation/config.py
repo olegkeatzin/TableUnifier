@@ -67,6 +67,18 @@ class DataGenConfig:
     warmup: bool = True
     """Прогреть модели перед генерацией (загрузить в GPU)"""
     
+    auto_llm_parallel: bool = True
+    """Автоматический подбор оптимального числа параллельных LLM запросов"""
+    
+    max_llm_parallel: int = 16
+    """Верхний предел num_parallel для LLM при автоподборе"""
+    
+    min_llm_parallel: int = 1
+    """Нижний предел num_parallel для LLM"""
+    
+    initial_llm_parallel: int = 1
+    """Начальный num_parallel (если auto_llm_parallel=False — используемый)"""
+    
     # ─────────────────── Генерация таблиц ───────────────────
     locales: List[str] = field(default_factory=lambda: ["ru_RU", "en_US"])
     """Локали Faker для генерации данных"""

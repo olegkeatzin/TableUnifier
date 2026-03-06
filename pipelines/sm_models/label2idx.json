@@ -1,0 +1,21 @@
+{
+  "article": 0,
+  "base_price": 1,
+  "country_of_origin": 2,
+  "delivery_date": 3,
+  "discount_percent": 4,
+  "item_number": 5,
+  "manufacturer": 6,
+  "notes": 7,
+  "price_after_discount": 8,
+  "product_group": 9,
+  "product_name": 10,
+  "quantity": 11,
+  "total_sum": 12,
+  "total_with_vat": 13,
+  "unit": 14,
+  "vat_amount": 15,
+  "vat_rate": 16,
+  "warehouse": 17,
+  "warranty": 18
+}

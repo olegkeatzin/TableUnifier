@@ -1,21 +1,19 @@
-"""Утилиты ускорения Ollama: автоподбор batch_size, keep_alive.
+"""Утилиты ускорения Ollama: автоподбор batch_size и llm_parallel, keep_alive.
 
 Поддерживаемые методы ускорения:
 1. keep_alive — модель остаётся в GPU между запросами (без повторной загрузки)
 2. num_predict — ограничение генерации (LLM не тратит время на лишние токены)
 3. num_ctx — уменьшенный контекст для коротких промптов (экономия VRAM)
 4. auto_batch_size — автоматический подбор оптимального batch_size для embed API
-5. warmup — предзагрузка моделей в GPU перед началом генерации
-
-LLM-генерация выполняется последовательно, т.к. Ollama по умолчанию обрабатывает
-один LLM-запрос за раз (OLLAMA_NUM_PARALLEL=1), и параллельные потоки через
-ThreadPoolExecutor лишь добавляют overhead без реального ускорения.
+5. auto_llm_parallel — автоматический подбор оптимального числа параллельных LLM запросов
+6. warmup — предзагрузка моделей в GPU перед началом генерации
 """
 
 import time
 import logging
 import numpy as np
 from typing import List, Dict, Optional, Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .config import DataGenConfig
 
@@ -37,15 +35,26 @@ class OllamaAccelerator:
     
     def __init__(self, config: DataGenConfig):
         import ollama
+        import httpx
         self.config = config
-        self.client = ollama.Client(host=config.ollama_host)
+        self.client = ollama.Client(
+            host=config.ollama_host,
+            timeout=httpx.Timeout(connect=10.0, read=120.0, write=30.0, pool=10.0),
+        )
         
         self._embed_batch_size: int = config.initial_batch_size
         self._calibrated = False
+        
+        self._llm_num_parallel: int = config.initial_llm_parallel
+        self._llm_calibrated = False
     
     @property
     def embed_batch_size(self) -> int:
         return self._embed_batch_size
+    
+    @property
+    def llm_num_parallel(self) -> int:
+        return self._llm_num_parallel
     
     # ─────────────────── Валидация моделей ───────────────────
     
@@ -290,7 +299,83 @@ class OllamaAccelerator:
         
         return all_embeddings
     
-    # ─────────────────── Последовательная LLM генерация ───────────────────
+    # ─────────────────── Автоподбор LLM num_parallel ───────────────────
+    
+    def calibrate_llm_parallel(self) -> int:
+        """Автоматический подбор оптимального числа параллельных LLM запросов.
+        
+        Алгоритм:
+        1. Пробуем num_parallel = 1, 2, 4, 8, 16
+        2. Измеряем throughput (промптов/сек) для каждого
+        3. Останавливаемся если: ошибка, или throughput начал падать
+        4. Возвращаем num_parallel с максимальным throughput
+        
+        Returns:
+            Оптимальное число параллельных потоков
+        """
+        if not self.config.auto_llm_parallel:
+            self._llm_num_parallel = self.config.initial_llm_parallel
+            logger.info(f"Auto llm_parallel отключён, используется {self._llm_num_parallel}")
+            return self._llm_num_parallel
+        
+        logger.info("Калибровка оптимального num_parallel для LLM...")
+        
+        test_prompts = [
+            f"Дай краткое описание для столбца таблицы с названием 'test_col_{i}'. "
+            f"Тип данных: str. Выведи только описание и ничего больше. /no_think"
+            for i in range(self.config.max_llm_parallel)
+        ]
+        
+        best_throughput = 0.0
+        best_num_parallel = self.config.min_llm_parallel
+        decline_count = 0
+        
+        sizes = []
+        n = self.config.min_llm_parallel
+        while n <= self.config.max_llm_parallel:
+            sizes.append(n)
+            n *= 2
+        
+        for num_parallel in sizes:
+            batch = test_prompts[:max(num_parallel, 4)]  # минимум 4 промпта для замера
+            try:
+                times = []
+                for _ in range(2):
+                    t0 = time.time()
+                    self._generate_parallel(batch, num_parallel)
+                    times.append(time.time() - t0)
+                
+                median_time = sorted(times)[len(times) // 2]
+                throughput = len(batch) / median_time
+                
+                logger.info(f"  num_parallel={num_parallel:>3d}: "
+                            f"{throughput:>8.1f} prompts/sec "
+                            f"(median {median_time:.3f}s)")
+                
+                if throughput > best_throughput:
+                    best_throughput = throughput
+                    best_num_parallel = num_parallel
+                    decline_count = 0
+                else:
+                    decline_count += 1
+                
+                if decline_count >= 2:
+                    logger.info(f"  Throughput падает, останавливаем калибровку")
+                    break
+                
+            except Exception as e:
+                logger.warning(f"  num_parallel={num_parallel}: ошибка ({e}), "
+                              f"используем предыдущий")
+                break
+        
+        self._llm_num_parallel = best_num_parallel
+        self._llm_calibrated = True
+        logger.info(f"Оптимальный num_parallel: {best_num_parallel} "
+                    f"({best_throughput:.1f} prompts/sec)")
+        
+        return best_num_parallel
+    
+    # ─────────────────── LLM генерация ───────────────────
     
     def generate_description(self, prompt: str) -> str:
         """Генерация одного описания через LLM с ускорениями."""
@@ -309,17 +394,45 @@ class OllamaAccelerator:
             logger.warning(f"LLM ошибка: {e}")
             return ""
     
+    def _generate_parallel(
+        self,
+        prompts: List[str],
+        num_parallel: int,
+    ) -> List[str]:
+        """Параллельная генерация описаний через ThreadPoolExecutor.
+        
+        Args:
+            prompts: Список промптов
+            num_parallel: Число параллельных потоков
+            
+        Returns:
+            Список описаний (в том же порядке)
+        """
+        results: List[Optional[str]] = [None] * len(prompts)
+        
+        def _worker(idx: int, prompt: str) -> tuple:
+            return idx, self.generate_description(prompt)
+        
+        with ThreadPoolExecutor(max_workers=num_parallel) as executor:
+            futures = {
+                executor.submit(_worker, idx, prompt): idx
+                for idx, prompt in enumerate(prompts)
+            }
+            for future in as_completed(futures):
+                idx, desc = future.result()
+                results[idx] = desc
+        
+        return [r if r is not None else "" for r in results]
+    
     def generate_descriptions_batch(
         self,
         prompts: List[str],
         progress_callback: Optional[Callable[[int, int], None]] = None,
     ) -> List[str]:
-        """Последовательная генерация описаний через LLM.
+        """Параллельная генерация описаний через LLM с оптимальным num_parallel.
         
-        Ollama по умолчанию обрабатывает один LLM-запрос за раз
-        (OLLAMA_NUM_PARALLEL=1). Параллельные потоки (ThreadPoolExecutor)
-        лишь добавляют overhead без реального ускорения, поэтому
-        генерация выполняется последовательно.
+        Использует ThreadPoolExecutor с откалиброванным числом потоков.
+        Промпты обрабатываются батчами для корректного прогресс-репортинга.
         
         Args:
             prompts: Список промптов
@@ -331,17 +444,31 @@ class OllamaAccelerator:
         if not prompts:
             return []
         
-        results: List[str] = []
+        if not self._llm_calibrated and self.config.auto_llm_parallel:
+            self.calibrate_llm_parallel()
+        
+        num_parallel = self._llm_num_parallel
         total = len(prompts)
+        results: List[Optional[str]] = [None] * total
+        processed = 0
         
-        for i, prompt in enumerate(prompts):
-            desc = self.generate_description(prompt)
-            results.append(desc)
-            
-            if progress_callback:
-                progress_callback(i + 1, total)
+        def _worker(idx: int, prompt: str) -> tuple:
+            return idx, self.generate_description(prompt)
         
-        return results
+        with ThreadPoolExecutor(max_workers=num_parallel) as executor:
+            futures = {
+                executor.submit(_worker, idx, prompt): idx
+                for idx, prompt in enumerate(prompts)
+            }
+            for future in as_completed(futures):
+                idx, desc = future.result()
+                results[idx] = desc
+                processed += 1
+                
+                if progress_callback:
+                    progress_callback(processed, total)
+        
+        return [r if r is not None else "" for r in results]
     
     # ─────────────────── Утилиты ───────────────────
     
@@ -383,6 +510,8 @@ class OllamaAccelerator:
             'llm_model': self.config.llm_model,
             'embed_batch_size': self._embed_batch_size,
             'calibrated': self._calibrated,
+            'llm_num_parallel': self._llm_num_parallel,
+            'llm_calibrated': self._llm_calibrated,
             'keep_alive': self.config.keep_alive,
             'num_predict': self.config.num_predict,
             'num_ctx': self.config.num_ctx,

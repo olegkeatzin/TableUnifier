@@ -340,18 +340,18 @@ class TablePairGraphBuilder:
 
 def compute_column_embeddings(
     df,
-    unifier,
+    sm_inference,
 ) -> Dict[str, np.ndarray]:
-    """Вычислить эмбеддинги столбцов через TableUnifier (из курсового проекта).
+    """Вычислить эмбеддинги столбцов через SchemaMatcherInference (из курсового проекта).
     
     Использует LLM для генерации описания столбца и embedding model для вектора.
     
     Args:
         df: DataFrame
-        unifier: TableUnifier instance
+        sm_inference: SchemaMatcherInference instance
         
     Returns:
         Dict {column_name: np.ndarray embedding}
     """
-    emb_serials = unifier.process_dataframe(df)
-    return {emb.name: emb.embedding for emb in emb_serials}
+    embeddings, column_names = sm_inference.compute_column_embeddings(df)
+    return {name: emb for name, emb in zip(column_names, embeddings)}
