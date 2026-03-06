@@ -67,10 +67,12 @@ from .columns import (
 )
 from .ollama_utils import OllamaAccelerator
 from .generator import UnifiedDatasetGenerator
+from .magellan_loader import MagellanConfig, MagellanDatasetLoader, MAGELLAN_DATASETS
 
 __all__ = [
     # Config
     'DataGenConfig',
+    'MagellanConfig',
     
     # Column templates
     'COLUMN_TEMPLATES',
@@ -97,4 +99,6 @@ __all__ = [
     
     # Main
     'UnifiedDatasetGenerator',
+    'MagellanDatasetLoader',
+    'MAGELLAN_DATASETS',
 ]

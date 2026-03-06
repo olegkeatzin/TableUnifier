@@ -194,6 +194,41 @@
     "model_dir": "er_models"
   },
 
+  "magellan": {
+    "ollama_host": "http://127.0.0.1:11434",
+    "llm_model": "qwen3.5:9b",
+    "embedding_model": "qwen3-embedding:8b",
+
+    "auto_batch_size": true,
+    "initial_batch_size": 8,
+    "max_batch_size": 512,
+    "min_batch_size": 1,
+    "keep_alive": "30m",
+    "num_predict": 150,
+    "num_ctx": 2048,
+    "warmup": true,
+
+    "auto_llm_parallel": true,
+    "max_llm_parallel": 16,
+    "min_llm_parallel": 1,
+    "initial_llm_parallel": 1,
+
+    "datasets": [
+      "DBLP-ACM",
+      "DBLP-GoogleScholar",
+      "Amazon-Google",
+      "Walmart-Amazon"
+    ],
+    "max_pairs_per_dataset": 0,
+    "sample_size": 5,
+
+    "output_dir": "magellan_dataset",
+    "sm_dataset_file": "sm_dataset.json",
+    "sm_metadata_file": "sm_metadata.json",
+    "er_raw_dir": "raw",
+    "download_dir": "magellan_downloads"
+  },
+
   "inference": {
     "sm_similarity_threshold": 0.6,
     "er_similarity_threshold": 0.7
