@@ -184,7 +184,7 @@
     "batch_size": 16,
     "learning_rate": 0.001,
     "weight_decay": 1e-5,
-    "num_epochs": 50,
+    "num_epochs": 500,
     "margin": 0.3,
     "mining_strategy": "semihard",
     "scheduler_patience": 5,
