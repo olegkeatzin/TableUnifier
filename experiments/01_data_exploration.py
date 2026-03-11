@@ -27,6 +27,11 @@ import pandas as pd
 
 from table_unifier.config import Config
 from table_unifier.dataset.download import DATASETS, download_dataset, load_dataset
+from table_unifier.dataset.embedding_generation import (
+    TokenEmbedder,
+    generate_column_embeddings,
+    serialize_row,
+)
 from table_unifier.dataset.schema_augmentation import augment_schema, apply_schema_injection
 from table_unifier.dataset.value_corruption import corrupt_dataframe
 
@@ -122,6 +127,8 @@ def generate_synthetic_for_one(
         "n_train": len(tables.get("train", [])),
         "n_valid": len(tables.get("valid", [])),
         "n_test": len(tables.get("test", [])),
+        "synth_a": noisy_a,
+        "synth_b": noisy_b,
     }
 
 
@@ -168,10 +175,14 @@ def generate_unified_dataset(
             failed.append(name)
 
     # ---- Сводная статистика ---- #
+    serializable_meta = [
+        {k: v for k, v in m.items() if k not in ("synth_a", "synth_b")}
+        for m in all_meta
+    ]
     summary = {
         "total_datasets": len(all_meta),
         "failed_datasets": failed,
-        "datasets": all_meta,
+        "datasets": serializable_meta,
         "total_rows_a": sum(m["rows_a"] for m in all_meta),
         "total_rows_b": sum(m["rows_b"] for m in all_meta),
         "domains": sorted({m["domain"] for m in all_meta}),
@@ -190,6 +201,8 @@ def generate_unified_dataset(
         logger.warning("Не удалось: %s", failed)
     logger.info("Сводка: %s", summary_path)
 
+    return all_meta
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Исследование и генерация датасетов")
@@ -202,6 +215,8 @@ def main() -> None:
     parser.add_argument("--data-dir", default="data", help="Путь для данных")
     parser.add_argument("--generate", action="store_true",
                         help="Генерировать синтетический датасет (нужен Ollama)")
+    parser.add_argument("--embeddings", action="store_true",
+                        help="Генерировать эмбеддинги (столбцы, строки, токены)")
     args = parser.parse_args()
 
     config = Config(data_dir=Path(args.data_dir))
@@ -225,8 +240,117 @@ def main() -> None:
             logger.exception("Ошибка загрузки %s — пропуск", name)
 
     # Генерация (опционально)
+    all_meta = None
     if args.generate:
-        generate_unified_dataset(dataset_names, config)
+        all_meta = generate_unified_dataset(dataset_names, config)
+
+    # Генерация эмбеддингов
+    if args.embeddings:
+        generate_all_embeddings(dataset_names, config, all_meta)
+
+
+def generate_all_embeddings(
+    dataset_names: list[str],
+    config: Config,
+    all_meta: list[dict] | None = None,
+) -> None:
+    """Генерация эмбеддингов для всех датасетов.
+
+    Если `all_meta` передан (из --generate), берёт синтетические таблицы.
+    Иначе загружает оригинальные таблицы.
+    """
+    from table_unifier.ollama_client import OllamaClient
+
+    client = OllamaClient(config.ollama)
+    token_embedder = TokenEmbedder(
+        model_name=config.entity_resolution.token_model_name,
+    )
+    out_dir = config.data_dir / "embeddings"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Индекс синтетических таблиц по имени датасета
+    synth_by_name: dict[str, dict] = {}
+    if all_meta:
+        synth_by_name = {m["name"]: m for m in all_meta}
+
+    for name in dataset_names:
+        logger.info("=" * 60)
+        logger.info("Генерация эмбеддингов: %s", name)
+        logger.info("=" * 60)
+
+        ds_dir = out_dir / name
+        ds_dir.mkdir(parents=True, exist_ok=True)
+
+        # Определяем таблицы (приоритет: in-memory → synthetic CSV → original)
+        synth_dir = config.data_dir / "synthetic" / name
+        if name in synth_by_name:
+            table_a = synth_by_name[name]["synth_a"]
+            table_b = synth_by_name[name]["synth_b"]
+            logger.info("[%s] Используем синтетические таблицы (in-memory)", name)
+        elif (synth_dir / "tableA_synth.csv").exists():
+            table_a = pd.read_csv(synth_dir / "tableA_synth.csv")
+            table_b = pd.read_csv(synth_dir / "tableB_synth.csv")
+            logger.info("[%s] Загружены синтетические таблицы из %s", name, synth_dir)
+        else:
+            try:
+                csv_path = download_dataset(name, config.data_dir)
+                tables = load_dataset(csv_path, name=name)
+                table_a, table_b = tables["tableA"], tables["tableB"]
+                logger.info("[%s] Используем оригинальные таблицы", name)
+            except Exception:
+                logger.exception("Не удалось загрузить %s — пропуск", name)
+                continue
+
+        columns_a = [c for c in table_a.columns if c != "id"]
+        columns_b = [c for c in table_b.columns if c != "id"]
+
+        # ---- 1. Column embeddings (Ollama) ---- #
+        logger.info("[%s] Column embeddings …", name)
+        col_emb_a = generate_column_embeddings(client, table_a, columns_a)
+        col_emb_b = generate_column_embeddings(client, table_b, columns_b)
+
+        # Сохраняем: {col_name: vector}
+        np.savez(
+            ds_dir / "column_embeddings_a.npz",
+            **{col: vec for col, vec in col_emb_a.items()},
+        )
+        np.savez(
+            ds_dir / "column_embeddings_b.npz",
+            **{col: vec for col, vec in col_emb_b.items()},
+        )
+
+        # ---- 2. Row embeddings (CLS) ---- #
+        logger.info("[%s] Row embeddings (CLS) …", name)
+        row_texts_a = [
+            serialize_row(row, columns_a)
+            for _, row in table_a.iterrows()
+        ]
+        row_texts_b = [
+            serialize_row(row, columns_b)
+            for _, row in table_b.iterrows()
+        ]
+        row_emb_a = token_embedder.embed_sentences(row_texts_a)
+        row_emb_b = token_embedder.embed_sentences(row_texts_b)
+
+        np.save(ds_dir / "row_embeddings_a.npy", row_emb_a)
+        np.save(ds_dir / "row_embeddings_b.npy", row_emb_b)
+
+        # ---- 3. Список столбцов (для воспроизводимости) ---- #
+        pd.DataFrame({"col_a": columns_a}).to_csv(ds_dir / "columns_a.csv", index=False)
+        pd.DataFrame({"col_b": columns_b}).to_csv(ds_dir / "columns_b.csv", index=False)
+
+        logger.info(
+            "[%s] Готово: col_a=%d (%d-dim), col_b=%d, rows_a=%s, rows_b=%s",
+            name,
+            len(col_emb_a),
+            next(iter(col_emb_a.values())).shape[0],
+            len(col_emb_b),
+            row_emb_a.shape,
+            row_emb_b.shape,
+        )
+        logger.info("[%s] Сохранено в %s", name, ds_dir)
+
+    logger.info("Все эмбеддинги сохранены в %s", out_dir)
 
 
 if __name__ == "__main__":
