@@ -23,7 +23,7 @@ def train_entity_resolution(
     val_triplet_indices: torch.Tensor | None = None,
     device: str | None = None,
     save_path: Path | None = None,
-) -> EntityResolutionGNN:
+) -> tuple["EntityResolutionGNN", dict]:
     """Обучить GNN для Entity Resolution.
 
     Args:
@@ -35,7 +35,7 @@ def train_entity_resolution(
         save_path:         путь для сохранения модели.
 
     Returns:
-        Обученная модель EntityResolutionGNN.
+        (model, history) где history = {"train_loss": [...], "val_loss": [...]}.
     """
     config = config or EntityResolutionConfig()
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -62,6 +62,7 @@ def train_entity_resolution(
     optimizer = torch.optim.Adam(model.parameters(), lr=config.lr)
 
     best_val_loss = float("inf")
+    history: dict[str, list[float]] = {"train_loss": [], "val_loss": []}
 
     for epoch in range(1, config.epochs + 1):
         # ---- Train ---- #
@@ -102,6 +103,7 @@ def train_entity_resolution(
                 n = embeddings[triplet_indices[:, 2]]
 
         train_loss = total_loss / max(n_batches, 1)
+        history["train_loss"].append(train_loss)
 
         # ---- Validation ---- #
         val_info = ""
@@ -113,6 +115,7 @@ def train_entity_resolution(
                 vp = val_emb[val_triplet_indices[:, 1]]
                 vn = val_emb[val_triplet_indices[:, 2]]
                 val_loss = criterion(va, vp, vn).item()
+            history["val_loss"].append(val_loss)
             val_info = f", val_loss={val_loss:.4f}"
 
             if val_loss < best_val_loss:
@@ -133,7 +136,15 @@ def train_entity_resolution(
         torch.save(model.state_dict(), save_path)
         logger.info("Модель ER сохранена: %s", save_path)
 
-    return model
+    # Сохранить историю рядом с моделью
+    if save_path:
+        import json
+        history_path = save_path.with_suffix(".history.json")
+        with open(history_path, "w", encoding="utf-8") as f:
+            json.dump(history, f)
+        logger.info("История обучения: %s", history_path)
+
+    return model, history
 
 
 # ------------------------------------------------------------------ #

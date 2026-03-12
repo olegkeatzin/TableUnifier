@@ -43,17 +43,19 @@ def triplet_indices():
 
 class TestTrainEntityResolution:
     def test_trains_and_returns_model(self, small_hetero_data, triplet_indices, er_config):
-        model = train_entity_resolution(
+        model, history = train_entity_resolution(
             data=small_hetero_data,
             triplet_indices=triplet_indices,
             config=er_config,
             device="cpu",
         )
         assert isinstance(model, EntityResolutionGNN)
+        assert "train_loss" in history
+        assert len(history["train_loss"]) == er_config.epochs
 
     def test_with_validation(self, small_hetero_data, triplet_indices, er_config):
         val_triplets = torch.tensor([[2, 5, 3]], dtype=torch.long)
-        model = train_entity_resolution(
+        model, history = train_entity_resolution(
             data=small_hetero_data,
             triplet_indices=triplet_indices,
             config=er_config,
@@ -61,6 +63,7 @@ class TestTrainEntityResolution:
             device="cpu",
         )
         assert isinstance(model, EntityResolutionGNN)
+        assert len(history["val_loss"]) == er_config.epochs
 
     def test_saves_model(self, small_hetero_data, triplet_indices, er_config, tmp_path):
         save_path = tmp_path / "er.pt"
@@ -72,6 +75,7 @@ class TestTrainEntityResolution:
             save_path=save_path,
         )
         assert save_path.exists()
+        assert (tmp_path / "er.history.json").exists()
 
 
 class TestGetRowEmbeddings:

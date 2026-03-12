@@ -29,8 +29,15 @@ def build_graph(
     token_embedder: TokenEmbedder,
     columns_a: list[str] | None = None,
     columns_b: list[str] | None = None,
+    precomputed_row_embeddings_a: np.ndarray | None = None,
+    precomputed_row_embeddings_b: np.ndarray | None = None,
 ) -> tuple[HeteroData, dict[str, int], dict[str, int]]:
     """Построить HeteroData-граф из двух таблиц.
+
+    Args:
+        precomputed_row_embeddings_a: готовые row-эмбеддинги Table A [N_a, D].
+            Если переданы, вызов token_embedder.embed_sentences пропускается.
+        precomputed_row_embeddings_b: аналогично для Table B.
 
     Returns:
         (data, id_to_global_a, id_to_global_b)
@@ -60,10 +67,16 @@ def build_graph(
     logger.info("Всего строк: %d (A=%d, B=%d)", n_rows, len(table_a), len(table_b))
 
     # ---- 2. CLS-эмбеддинги строк ---- #
-    row_texts = [
-        serialize_row(row, cols) for row, cols in zip(all_rows, all_row_columns)
-    ]
-    row_embeddings = token_embedder.embed_sentences(row_texts)  # [N_rows, D_row]
+    if precomputed_row_embeddings_a is not None and precomputed_row_embeddings_b is not None:
+        row_embeddings = np.concatenate(
+            [precomputed_row_embeddings_a, precomputed_row_embeddings_b], axis=0
+        )
+        logger.info("Используются готовые row-эмбеддинги (shape=%s)", row_embeddings.shape)
+    else:
+        row_texts = [
+            serialize_row(row, cols) for row, cols in zip(all_rows, all_row_columns)
+        ]
+        row_embeddings = token_embedder.embed_sentences(row_texts)  # [N_rows, D_row]
 
     # ---- 3. Построение связей и токенов ---- #
     token_vocab: dict[int, int] = {}  # token_id → node_index
