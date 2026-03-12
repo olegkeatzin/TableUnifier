@@ -18,8 +18,28 @@ SYNONYM_PROMPT = (
     "Given the column name '{col_name}' from a {domain} database table, "
     "generate {n} alternative column names that could be used in a different "
     "system to represent the same data.\n"
-    "Output only the names, one per line, without numbering or explanation. /no_think"
+    "Rules:\n"
+    "- Output ONLY the column names, one per line.\n"
+    "- No numbering, no explanations, no sentences.\n"
+    "- Each name must be a valid identifier (letters, digits, underscores, no spaces).\n"
+    "/no_think"
 )
+
+# Regex for valid column-name tokens: word chars and digits only, length 1–80
+import re as _re
+_VALID_COL_RE = _re.compile(r"^[\w]{1,80}$")
+
+
+def _is_valid_column_name(s: str) -> bool:
+    """Return True only if *s* looks like a column name and not reasoning text."""
+    # Too long → reasoning leak
+    if len(s) > 80:
+        return False
+    # Contains spaces → sentence / multi-word description not using underscores
+    if " " in s:
+        return False
+    # Must consist only of word chars (letters, digits, underscores)
+    return bool(_VALID_COL_RE.match(s))
 
 
 def generate_column_synonyms(
@@ -29,9 +49,23 @@ def generate_column_synonyms(
     n: int = 5,
 ) -> list[str]:
     """Сгенерировать *n* синонимов для имени столбца *col_name*."""
+    import re
+
     prompt = SYNONYM_PROMPT.format(col_name=col_name, domain=domain, n=n)
     response = client.generate(prompt)
-    synonyms = [line.strip() for line in response.strip().splitlines() if line.strip()]
+
+    # Strip <think>…</think> reasoning blocks that some models emit
+    response = re.sub(r"<think>.*?</think>", "", response, flags=re.DOTALL)
+
+    candidates = [line.strip() for line in response.strip().splitlines() if line.strip()]
+    synonyms = [c for c in candidates if _is_valid_column_name(c)]
+
+    if not synonyms:
+        logger.warning(
+            "Не удалось извлечь синонимы для '%s' — LLM вернул: %r", col_name, response[:200]
+        )
+        return [col_name]
+
     return synonyms[:n]
 
 

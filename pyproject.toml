@@ -16,6 +16,8 @@ dependencies = [
     "requests>=2.31.0",
     "torchvision>=0.25.0",
     "torchaudio>=2.10.0",
+    "ipykernel>=7.2.0",
+    "matplotlib>=3.10.8",
 ]
 
 [build-system]
