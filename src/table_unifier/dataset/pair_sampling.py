@@ -25,8 +25,11 @@ def split_labeled_pairs(
     positives: list[tuple[str, str]] = []
     negatives: list[tuple[str, str]] = []
     for _, row in labels_df.iterrows():
+        label_val = row[label_col]
+        if pd.isna(label_val):
+            continue
         pair = (str(row[ltable_id_col]), str(row[rtable_id_col]))
-        if int(row[label_col]) == 1:
+        if int(label_val) == 1:
             positives.append(pair)
         else:
             negatives.append(pair)
@@ -54,16 +57,20 @@ def mine_hard_negatives(
     sim_matrix = cosine_similarity(row_embeddings_a, row_embeddings_b)
 
     triplets: list[tuple[str, str, str]] = []
-    ids_b = sorted(id_to_idx_b.keys())
+    idx_to_id_b = {v: k for k, v in id_to_idx_b.items()}
 
     for a_id, p_id in positives:
+        if a_id not in id_to_idx_a or p_id not in id_to_idx_b:
+            continue
         a_idx = id_to_idx_a[a_id]
         sims = sim_matrix[a_idx]
         # Сортировка по убыванию сходства
         ranked = np.argsort(-sims)
         count = 0
         for b_local_idx in ranked:
-            n_id = ids_b[b_local_idx]
+            n_id = idx_to_id_b.get(int(b_local_idx))
+            if n_id is None:
+                continue
             if n_id == p_id or (a_id, n_id) in positive_set:
                 continue
             triplets.append((a_id, p_id, n_id))
@@ -87,5 +94,11 @@ def build_triplet_indices(
     """
     result = []
     for a_id, p_id, n_id in triplets:
-        result.append([id_to_global_a[a_id], id_to_global_b[p_id], id_to_global_b[n_id]])
+        ga = id_to_global_a.get(a_id)
+        gp = id_to_global_b.get(p_id)
+        gn = id_to_global_b.get(n_id)
+        if ga is not None and gp is not None and gn is not None:
+            result.append([ga, gp, gn])
+    if not result:
+        return torch.zeros((0, 3), dtype=torch.long)
     return torch.tensor(result, dtype=torch.long)
