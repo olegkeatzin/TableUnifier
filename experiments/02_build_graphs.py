@@ -10,6 +10,12 @@
 
     # Все датасеты + объединённый граф
     python -m experiments.02_build_graphs --all
+
+    # Возобновить прерванный запуск (пропустить готовые графы)
+    python -m experiments.02_build_graphs --all --skip-existing
+
+    # Построить только unified из уже готовых per-dataset графов
+    python -m experiments.02_build_graphs --unified-only
 """
 
 from __future__ import annotations
@@ -383,16 +389,35 @@ def main() -> None:
     )
     parser.add_argument("--all", action="store_true",
                         help="Построить графы для всех датасетов + unified")
+    parser.add_argument("--unified-only", action="store_true",
+                        help="Построить только unified граф из уже готовых per-dataset графов")
+    parser.add_argument("--skip-existing", action="store_true",
+                        help="Пропустить датасеты, для которых граф уже построен")
     parser.add_argument("--data-dir", default="data")
     parser.add_argument("--device", default=None)
     args = parser.parse_args()
 
-    if not args.all and not args.dataset:
-        parser.error("Укажите --dataset <name> или --all")
+    if not args.all and not args.dataset and not args.unified_only:
+        parser.error("Укажите --dataset <name>, --all или --unified-only")
 
     config = Config(data_dir=Path(args.data_dir))
     graphs_dir = config.data_dir / "graphs"
     graphs_dir.mkdir(parents=True, exist_ok=True)
+
+    # --unified-only: построить только unified граф из готовых per-dataset графов
+    if args.unified_only:
+        available = [
+            d.name for d in sorted(graphs_dir.iterdir())
+            if d.is_dir() and d.name != "unified" and (d / "graph.pt").exists()
+        ]
+        if not available:
+            logger.error("Нет готовых per-dataset графов в %s", graphs_dir)
+            return
+        logger.info("Найдено %d готовых графов: %s", len(available), available)
+        unified_stats = build_unified_graph(available, graphs_dir)
+        if unified_stats:
+            logger.info("Unified граф построен успешно")
+        return
 
     er_cfg = config.entity_resolution
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -405,6 +430,14 @@ def main() -> None:
     failed: list[str] = []
 
     for name in dataset_names:
+        # --skip-existing: пропустить датасеты с готовым графом
+        if args.skip_existing and (graphs_dir / name / "graph.pt").exists():
+            logger.info("[%s] Граф уже существует — пропуск", name)
+            stats_path = graphs_dir / name / "stats.json"
+            if stats_path.exists():
+                with open(stats_path) as f:
+                    all_stats.append(json.load(f))
+            continue
         try:
             stats = build_and_save_single(name, config, token_embedder, graphs_dir)
             if stats is not None:
