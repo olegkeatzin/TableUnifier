@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import logging
 from pathlib import Path
@@ -424,6 +425,11 @@ def main() -> None:
 
     token_embedder = TokenEmbedder(model_name=er_cfg.token_model_name, device=device)
 
+    # Модель не нужна — используются только tokenizer и vocab_embeddings
+    del token_embedder.model
+    torch.cuda.empty_cache()
+    gc.collect()
+
     dataset_names = list(DATASETS.keys()) if args.all else [args.dataset]
 
     all_stats: list[dict] = []
@@ -447,6 +453,10 @@ def main() -> None:
         except Exception:
             logger.exception("Ошибка при построении графа %s", name)
             failed.append(name)
+
+        # Очистка памяти между датасетами
+        gc.collect()
+        torch.cuda.empty_cache()
 
     # Unified (только при --all)
     unified_stats = None

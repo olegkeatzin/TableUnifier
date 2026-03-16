@@ -84,7 +84,10 @@ def build_graph(
 
     t2r_src: list[int] = []
     t2r_dst: list[int] = []
-    t2r_attr: list[np.ndarray] = []
+    t2r_col_idx: list[int] = []  # индекс столбца → col_emb_list
+
+    col_emb_list: list[np.ndarray] = []
+    col_to_idx: dict[str, int] = {}
 
     for row_idx, (row, cols) in enumerate(zip(all_rows, all_row_columns)):
         for col in cols:
@@ -98,6 +101,11 @@ def build_graph(
             if col_emb is None:
                 continue
 
+            if col not in col_to_idx:
+                col_to_idx[col] = len(col_emb_list)
+                col_emb_list.append(col_emb)
+            cidx = col_to_idx[col]
+
             for tid in tids:
                 if tid not in token_vocab:
                     token_vocab[tid] = len(token_ids_list)
@@ -106,7 +114,7 @@ def build_graph(
 
                 t2r_src.append(token_node)
                 t2r_dst.append(row_idx)
-                t2r_attr.append(col_emb)
+                t2r_col_idx.append(cidx)
 
     n_tokens = len(token_ids_list)
     logger.info("Уникальных токенов: %d, рёбер: %d", n_tokens, len(t2r_src))
@@ -124,7 +132,11 @@ def build_graph(
 
     # Token → Row
     t2r_edge_index = torch.tensor([t2r_src, t2r_dst], dtype=torch.long)
-    t2r_edge_attr = torch.tensor(np.stack(t2r_attr), dtype=torch.float32)
+    # Собираем edge_attr через индекс столбца (вместо хранения N копий вектора)
+    col_emb_matrix = np.stack(col_emb_list)  # [n_cols, 4096]
+    col_idx_arr = np.array(t2r_col_idx, dtype=np.intp)
+    t2r_edge_attr = torch.tensor(col_emb_matrix[col_idx_arr], dtype=torch.float32)
+    del col_idx_arr
     data["token", "in_row", "row"].edge_index = t2r_edge_index
     data["token", "in_row", "row"].edge_attr = t2r_edge_attr
 
