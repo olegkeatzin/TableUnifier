@@ -74,15 +74,18 @@ def small_hetero_data() -> HeteroData:
         rng.standard_normal((n_tokens, token_dim)), dtype=torch.float32,
     )
 
+    n_cols = 4
     t2r_src = torch.randint(0, n_tokens, (n_edges,))
     t2r_dst = torch.randint(0, n_rows, (n_edges,))
-    edge_attr = torch.tensor(
-        rng.standard_normal((n_edges, col_dim)), dtype=torch.float32,
+    edge_col_idx = torch.randint(0, n_cols, (n_edges,))
+
+    data.col_embeddings = torch.tensor(
+        rng.standard_normal((n_cols, col_dim)), dtype=torch.float32,
     )
 
     data["token", "in_row", "row"].edge_index = torch.stack([t2r_src, t2r_dst])
-    data["token", "in_row", "row"].edge_attr = edge_attr
+    data["token", "in_row", "row"].edge_col_idx = edge_col_idx
     data["row", "has_token", "token"].edge_index = torch.stack([t2r_dst, t2r_src])
-    data["row", "has_token", "token"].edge_attr = edge_attr.clone()
+    data["row", "has_token", "token"].edge_col_idx = edge_col_idx
 
     return data

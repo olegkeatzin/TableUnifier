@@ -194,7 +194,8 @@ def build_and_save_single(
         "n_edges": int(graph["token", "in_row", "row"].edge_index.shape[1]),
         "row_dim": int(graph["row"].x.shape[1]),
         "token_dim": int(graph["token"].x.shape[1]),
-        "edge_attr_dim": int(graph["token", "in_row", "row"].edge_attr.shape[1]),
+        "col_dim": int(graph.col_embeddings.shape[1]),
+        "n_cols": int(graph.col_embeddings.shape[0]),
         "n_train_triplets": int(len(train_triplets)),
         "n_val_triplets": int(len(val_triplets)),
         "n_train_positives": len(positives_train),
@@ -222,41 +223,47 @@ def merge_graphs(graphs: list[HeteroData]) -> HeteroData:
     """Объединить несколько HeteroData-графов в один."""
     all_row_x: list[torch.Tensor] = []
     all_token_x: list[torch.Tensor] = []
+    all_col_emb: list[torch.Tensor] = []
     t2r_src_all: list[torch.Tensor] = []
     t2r_dst_all: list[torch.Tensor] = []
-    t2r_attr_all: list[torch.Tensor] = []
+    t2r_col_idx_all: list[torch.Tensor] = []
 
     row_offset = 0
     token_offset = 0
+    col_offset = 0
 
     for g in graphs:
         n_rows = g["row"].x.shape[0]
         n_tokens = g["token"].x.shape[0]
+        n_cols = g.col_embeddings.shape[0]
 
         all_row_x.append(g["row"].x)
         all_token_x.append(g["token"].x)
+        all_col_emb.append(g.col_embeddings)
 
         ei = g["token", "in_row", "row"].edge_index
         t2r_src_all.append(ei[0] + token_offset)
         t2r_dst_all.append(ei[1] + row_offset)
-        t2r_attr_all.append(g["token", "in_row", "row"].edge_attr)
+        t2r_col_idx_all.append(g["token", "in_row", "row"].edge_col_idx + col_offset)
 
         row_offset += n_rows
         token_offset += n_tokens
+        col_offset += n_cols
 
     merged = HeteroData()
     merged["row"].x = torch.cat(all_row_x, dim=0)
     merged["token"].x = torch.cat(all_token_x, dim=0)
+    merged.col_embeddings = torch.cat(all_col_emb, dim=0)
 
     t2r_edge_index = torch.stack([
         torch.cat(t2r_src_all), torch.cat(t2r_dst_all),
     ])
-    t2r_edge_attr = torch.cat(t2r_attr_all, dim=0)
+    edge_col_idx = torch.cat(t2r_col_idx_all, dim=0)
 
     merged["token", "in_row", "row"].edge_index = t2r_edge_index
-    merged["token", "in_row", "row"].edge_attr = t2r_edge_attr
+    merged["token", "in_row", "row"].edge_col_idx = edge_col_idx
     merged["row", "has_token", "token"].edge_index = t2r_edge_index.flip(0)
-    merged["row", "has_token", "token"].edge_attr = t2r_edge_attr.clone()
+    merged["row", "has_token", "token"].edge_col_idx = edge_col_idx
 
     return merged
 
@@ -394,6 +401,8 @@ def main() -> None:
                         help="Построить только unified граф из уже готовых per-dataset графов")
     parser.add_argument("--skip-existing", action="store_true",
                         help="Пропустить датасеты, для которых граф уже построен")
+    parser.add_argument("--no-unified", action="store_true",
+                        help="Не строить unified граф (только per-dataset)")
     parser.add_argument("--data-dir", default="data")
     parser.add_argument("--device", default=None)
     args = parser.parse_args()
@@ -458,9 +467,9 @@ def main() -> None:
         gc.collect()
         torch.cuda.empty_cache()
 
-    # Unified (только при --all)
+    # Unified (только при --all и без --no-unified)
     unified_stats = None
-    if args.all and all_stats:
+    if args.all and all_stats and not args.no_unified:
         successful = [s["name"] for s in all_stats]
         unified_stats = build_unified_graph(successful, graphs_dir)
 

@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import logging
+import random
 from collections import defaultdict
 
 import numpy as np
@@ -31,13 +32,25 @@ def build_graph(
     columns_b: list[str] | None = None,
     precomputed_row_embeddings_a: np.ndarray | None = None,
     precomputed_row_embeddings_b: np.ndarray | None = None,
+    max_token_df: float = 0.3,
+    max_tokens_per_cell: int = 16,
 ) -> tuple[HeteroData, dict[str, int], dict[str, int]]:
     """Построить HeteroData-граф из двух таблиц.
+
+    Токены фильтруются в два этапа:
+    1. IDF-фильтрация: удаляются токены, встречающиеся в >max_token_df доле строк
+       (стоп-слова, пунктуация, артикли) — они не помогают различать сущности.
+    2. Если после фильтрации ячейка даёт >max_tokens_per_cell токенов,
+       берётся случайная выборка (не первые N, чтобы охватить всю ячейку).
 
     Args:
         precomputed_row_embeddings_a: готовые row-эмбеддинги Table A [N_a, D].
             Если переданы, вызов token_embedder.embed_sentences пропускается.
         precomputed_row_embeddings_b: аналогично для Table B.
+        max_token_df: порог document frequency (доля строк). Токены, встречающиеся
+            чаще, считаются стоп-словами и удаляются. По умолч. 0.3 (30% строк).
+        max_tokens_per_cell: лимит токенов на ячейку после IDF-фильтрации.
+            При превышении — случайная выборка. По умолч. 16.
 
     Returns:
         (data, id_to_global_a, id_to_global_b)
@@ -78,13 +91,15 @@ def build_graph(
         ]
         row_embeddings = token_embedder.embed_sentences(row_texts)  # [N_rows, D_row]
 
-    # ---- 3. Построение связей и токенов ---- #
+    # ---- 3. Построение связей и токенов (проход 1: сбор всех рёбер) ---- #
     token_vocab: dict[int, int] = {}  # token_id → node_index
     token_ids_list: list[int] = []    # node_index → original token_id
 
-    t2r_src: list[int] = []
-    t2r_dst: list[int] = []
-    t2r_col_idx: list[int] = []  # индекс столбца → col_emb_list
+    # Сырые рёбра до IDF-фильтрации: (token_node, row_idx, col_idx)
+    raw_edges: list[tuple[int, int, int]] = []
+
+    # Для вычисления document frequency: token_node → множество строк
+    token_row_sets: dict[int, set] = defaultdict(set)
 
     col_emb_list: list[np.ndarray] = []
     col_to_idx: dict[str, int] = {}
@@ -106,18 +121,72 @@ def build_graph(
                 col_emb_list.append(col_emb)
             cidx = col_to_idx[col]
 
+            # Дедупликация токенов внутри ячейки: одно ребро token→row на токен
+            seen_in_cell: set[int] = set()
             for tid in tids:
+                if tid in seen_in_cell:
+                    continue
+                seen_in_cell.add(tid)
+
                 if tid not in token_vocab:
                     token_vocab[tid] = len(token_ids_list)
                     token_ids_list.append(tid)
                 token_node = token_vocab[tid]
 
-                t2r_src.append(token_node)
-                t2r_dst.append(row_idx)
-                t2r_col_idx.append(cidx)
+                raw_edges.append((token_node, row_idx, cidx))
+                token_row_sets[token_node].add(row_idx)
+
+    # ---- 3b. IDF-фильтрация: удаляем стоп-токены ---- #
+    # Токены, встречающиеся в >max_token_df доле строк — стоп-слова/пунктуация.
+    # Для ER они бесполезны: одинаково присутствуют в matching и non-matching парах.
+    idf_threshold = int(max_token_df * n_rows)
+    stopword_nodes = {
+        node for node, rows in token_row_sets.items()
+        if len(rows) > idf_threshold
+    }
+    if stopword_nodes:
+        logger.info(
+            "IDF-фильтрация: удалено %d/%d токенов (df > %.0f%% строк)",
+            len(stopword_nodes), len(token_ids_list), max_token_df * 100,
+        )
+
+    # ---- 3c. Построение финальных рёбер с лимитом per-cell ---- #
+    # Группируем по (row_idx, col_idx), фильтруем стоп-токены,
+    # при превышении лимита берём случайную выборку (не первые N).
+    cell_tokens: dict[tuple[int, int], list[int]] = defaultdict(list)
+    for token_node, row_idx, cidx in raw_edges:
+        if token_node not in stopword_nodes:
+            cell_tokens[(row_idx, cidx)].append(token_node)
+
+    t2r_src: list[int] = []
+    t2r_dst: list[int] = []
+    t2r_col_idx: list[int] = []
+
+    for (row_idx, cidx), nodes in cell_tokens.items():
+        if len(nodes) > max_tokens_per_cell:
+            nodes = random.sample(nodes, max_tokens_per_cell)
+        for token_node in nodes:
+            t2r_src.append(token_node)
+            t2r_dst.append(row_idx)
+            t2r_col_idx.append(cidx)
+
+    # Ремаппинг: оставляем только токены, задействованные в рёбрах
+    used_nodes = set(t2r_src)
+    old_to_new: dict[int, int] = {}
+    new_token_ids_list: list[int] = []
+    for old_node, tid in enumerate(token_ids_list):
+        if old_node in used_nodes:
+            old_to_new[old_node] = len(new_token_ids_list)
+            new_token_ids_list.append(tid)
+
+    t2r_src = [old_to_new[n] for n in t2r_src]
+    token_ids_list = new_token_ids_list
 
     n_tokens = len(token_ids_list)
-    logger.info("Уникальных токенов: %d, рёбер: %d", n_tokens, len(t2r_src))
+    logger.info(
+        "Уникальных токенов: %d (после фильтрации), рёбер: %d",
+        n_tokens, len(t2r_src),
+    )
 
     # ---- 4. Vocabulary embeddings токенов ---- #
     token_embeddings = np.stack([
@@ -130,26 +199,29 @@ def build_graph(
     data["row"].x = torch.tensor(row_embeddings, dtype=torch.float32)
     data["token"].x = torch.tensor(token_embeddings, dtype=torch.float32)
 
+    # Матрица эмбеддингов столбцов (компактная: [n_cols, 4096])
+    col_emb_matrix = torch.tensor(np.stack(col_emb_list), dtype=torch.float32)
+    data.col_embeddings = col_emb_matrix
+
+    # Индекс столбца для каждого ребра (int, [n_edges])
+    edge_col_idx = torch.tensor(t2r_col_idx, dtype=torch.long)
+
     # Token → Row
     t2r_edge_index = torch.tensor([t2r_src, t2r_dst], dtype=torch.long)
-    # Собираем edge_attr через индекс столбца (вместо хранения N копий вектора)
-    col_emb_matrix = np.stack(col_emb_list)  # [n_cols, 4096]
-    col_idx_arr = np.array(t2r_col_idx, dtype=np.intp)
-    t2r_edge_attr = torch.tensor(col_emb_matrix[col_idx_arr], dtype=torch.float32)
-    del col_idx_arr
     data["token", "in_row", "row"].edge_index = t2r_edge_index
-    data["token", "in_row", "row"].edge_attr = t2r_edge_attr
+    data["token", "in_row", "row"].edge_col_idx = edge_col_idx
 
-    # Row → Token (обратные рёбра с тем же атрибутом)
+    # Row → Token (обратные рёбра с тем же индексом столбца)
     r2t_edge_index = torch.tensor([t2r_dst, t2r_src], dtype=torch.long)
     data["row", "has_token", "token"].edge_index = r2t_edge_index
-    data["row", "has_token", "token"].edge_attr = t2r_edge_attr.clone()
+    data["row", "has_token", "token"].edge_col_idx = edge_col_idx
 
     logger.info(
-        "Граф: row=%d, token=%d, edges=%d",
+        "Граф: row=%d, token=%d, edges=%d, cols=%d",
         data["row"].x.shape[0],
         data["token"].x.shape[0],
         t2r_edge_index.shape[1],
+        col_emb_matrix.shape[0],
     )
 
     return data, id_to_global_a, id_to_global_b

@@ -17,7 +17,7 @@ class TestEntityResolutionGNN:
             edge_dim=16,
             output_dim=16,
             num_gnn_layers=2,
-            num_heads=4,
+            num_heads=1,
             dropout=0.0,
         )
 
@@ -42,11 +42,10 @@ class TestEntityResolutionGNN:
         grads = [p.grad is not None for p in model.parameters() if p.requires_grad]
         assert any(grads), "At least some parameters should receive gradients"
 
-    def test_jumping_knowledge_collects_all_layers(self, model, small_hetero_data):
-        # jk_linear input_features = hidden_dim * (num_gnn_layers + 1)
-        expected_in = 32 * (2 + 1)  # hidden_dim * (L+1)
-        assert model.jk_linear.in_features == expected_in
-        assert model.jk_linear.out_features == 32
+    def test_output_head_maps_to_output_dim(self, model, small_hetero_data):
+        # output_head: Linear(hidden_dim → output_dim)
+        assert model.output_head[0].in_features == 32
+        assert model.output_head[0].out_features == 16
 
     def test_num_gnn_layers(self, model):
         assert len(model.gnn_layers) == 2

@@ -1,51 +1,55 @@
-"""Один слой GNN с двунаправленным TransformerConv.
+"""Один слой GNN с edge-aware message passing.
 
-Пинг-понг Message Passing (из Entity Resolution.canvas):
-  Шаг 1: Token → Row  (t2r_conv)  + Residual + LayerNorm
-  Шаг 2: Row → Token   (r2t_conv) + Residual + LayerNorm
+Простой однонаправленный слой (token → row):
+  message = Linear(concat(token_h, edge_attr))
+  aggregation = mean
+  update = residual + LayerNorm
 """
 
 import torch
 import torch.nn as nn
-from torch_geometric.nn import TransformerConv
+from torch_geometric.nn import MessagePassing
+
+
+class EdgeMeanConv(MessagePassing):
+    """Mean-aggregation с edge features.
+
+    message_j = Linear(concat(h_j, edge_attr))
+    row_h_new = mean(messages) → residual + LayerNorm
+    """
+
+    def __init__(self, in_dim: int, edge_dim: int, out_dim: int):
+        super().__init__(aggr="mean")
+        self.lin = nn.Linear(in_dim + edge_dim, out_dim)
+
+    def forward(
+        self,
+        x_src: torch.Tensor,
+        x_dst: torch.Tensor,
+        edge_index: torch.Tensor,
+        edge_attr: torch.Tensor,
+    ) -> torch.Tensor:
+        size = (x_src.size(0), x_dst.size(0))
+        return self.propagate(edge_index, x=x_src, edge_attr=edge_attr, size=size)
+
+    def message(self, x_j: torch.Tensor, edge_attr: torch.Tensor) -> torch.Tensor:
+        return self.lin(torch.cat([x_j, edge_attr], dim=-1))
 
 
 class GNNLayer(nn.Module):
-    """Двудольный слой GNN с TransformerConv."""
+    """Однонаправленный слой: Token → Row с edge features."""
 
     def __init__(
         self,
-        hidden_dim: int = 256,
-        edge_dim: int = 128,
-        num_heads: int = 4,
+        hidden_dim: int = 128,
+        edge_dim: int = 64,
+        num_heads: int = 1,  # не используется, оставлен для совместимости
         dropout: float = 0.1,
     ):
         super().__init__()
-        assert hidden_dim % num_heads == 0
-
-        # Шаг 1: Token → Row
-        self.t2r_conv = TransformerConv(
-            in_channels=hidden_dim,
-            out_channels=hidden_dim // num_heads,
-            heads=num_heads,
-            concat=True,
-            edge_dim=edge_dim,
-            dropout=dropout,
-        )
-        self.row_norm = nn.LayerNorm(hidden_dim)
-        self.row_dropout = nn.Dropout(dropout)
-
-        # Шаг 2: Row → Token
-        self.r2t_conv = TransformerConv(
-            in_channels=hidden_dim,
-            out_channels=hidden_dim // num_heads,
-            heads=num_heads,
-            concat=True,
-            edge_dim=edge_dim,
-            dropout=dropout,
-        )
-        self.token_norm = nn.LayerNorm(hidden_dim)
-        self.token_dropout = nn.Dropout(dropout)
+        self.conv = EdgeMeanConv(hidden_dim, edge_dim, hidden_dim)
+        self.norm = nn.LayerNorm(hidden_dim)
+        self.dropout = nn.Dropout(dropout)
 
     def forward(
         self,
@@ -56,28 +60,9 @@ class GNNLayer(nn.Module):
         r2t_edge_index: torch.Tensor,
         edge_attr_r2t: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Args:
-            row_x:          [N_rows, D_hidden]
-            token_x:        [N_tokens, D_hidden]
-            t2r_edge_index: [2, E] — token(src) → row(dst)
-            edge_attr_t2r:  [E, D_edge]
-            r2t_edge_index: [2, E] — row(src) → token(dst)
-            edge_attr_r2t:  [E, D_edge]
+        # Только Token → Row (без обратного направления)
+        row_msg = self.conv(token_x, row_x, t2r_edge_index, edge_attr_t2r)
+        row_x = self.norm(row_x + self.dropout(row_msg))
 
-        Returns:
-            (row_x_updated, token_x_updated)
-        """
-        # Шаг 1: Tokens → Rows
-        row_msg = self.t2r_conv(
-            (token_x, row_x), t2r_edge_index, edge_attr_t2r,
-        )
-        row_x = self.row_norm(row_x + self.row_dropout(row_msg))
-
-        # Шаг 2: Rows → Tokens
-        token_msg = self.r2t_conv(
-            (row_x, token_x), r2t_edge_index, edge_attr_r2t,
-        )
-        token_x = self.token_norm(token_x + self.token_dropout(token_msg))
-
+        # token_x не обновляется — возвращаем как есть
         return row_x, token_x

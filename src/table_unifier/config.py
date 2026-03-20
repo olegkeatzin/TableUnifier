@@ -33,11 +33,11 @@ class EntityResolutionConfig:
     row_dim: int = 312  # hidden size rubert-tiny2
     token_dim: int = 312  # vocabulary embedding dim
     col_dim: int = 4096  # qwen3-embedding:8b
-    hidden_dim: int = 256
-    edge_dim: int = 128
+    hidden_dim: int = 128
+    edge_dim: int = 64
     output_dim: int = 128
-    num_gnn_layers: int = 3
-    num_heads: int = 4
+    num_gnn_layers: int = 2
+    num_heads: int = 1
     dropout: float = 0.1
     margin: float = 0.3
     lr: float = 1e-3

@@ -58,6 +58,7 @@ class TestGNNLayer:
         assert row_x.grad is not None
         assert token_x.grad is not None
 
-    def test_assertion_heads_divides_hidden(self):
-        with pytest.raises(AssertionError):
-            GNNLayer(hidden_dim=33, edge_dim=16, num_heads=4)
+    def test_odd_hidden_dim(self):
+        # Простая архитектура не требует деления на heads
+        layer = GNNLayer(hidden_dim=33, edge_dim=16, num_heads=1)
+        assert layer is not None
