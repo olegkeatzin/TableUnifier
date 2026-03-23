@@ -108,17 +108,35 @@ def evaluate_ranking(
     """ROC-AUC и Average Precision на парах из df."""
     positives, negatives = split_labeled_pairs(df)
     scores, labels = [], []
+    missing_a, missing_b = 0, 0
     for a_id, b_id in positives:
         ga, gb = id_to_global_a.get(a_id), id_to_global_b.get(b_id)
+        if ga is None:
+            missing_a += 1
+        if gb is None:
+            missing_b += 1
         if ga is not None and gb is not None:
             scores.append((embeddings[ga] @ embeddings[gb]).item())
             labels.append(1)
     for a_id, b_id in negatives:
         ga, gb = id_to_global_a.get(a_id), id_to_global_b.get(b_id)
+        if ga is None:
+            missing_a += 1
+        if gb is None:
+            missing_b += 1
         if ga is not None and gb is not None:
             scores.append((embeddings[ga] @ embeddings[gb]).item())
             labels.append(0)
     if not labels:
+        total = len(positives) + len(negatives)
+        logger.warning(
+            "evaluate_ranking: 0/%d пар сматчились (missing_a=%d, missing_b=%d). "
+            "Пример ID из пар: %s | Пример ключей a: %s | b: %s",
+            total, missing_a, missing_b,
+            list(positives[:2]) + list(negatives[:2]),
+            list(id_to_global_a.keys())[:3],
+            list(id_to_global_b.keys())[:3],
+        )
         return {}
     scores_arr, labels_arr = np.array(scores), np.array(labels)
     return {
@@ -150,8 +168,9 @@ def evaluate_model_on_datasets(
 
         if eval_df is not None:
             metrics = evaluate_ranking(embeddings, eval_df, id_a, id_b)
-            metrics["name"] = ds["name"]
-            results.append(metrics)
+            if metrics:  # пропускаем датасеты без валидных пар
+                metrics["name"] = ds["name"]
+                results.append(metrics)
     return results
 
 
