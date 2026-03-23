@@ -29,19 +29,12 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
-from sklearn.metrics import (
-    average_precision_score,
-    f1_score,
-    precision_score,
-    recall_score,
-    roc_auc_score,
-)
+from sklearn.metrics import average_precision_score, roc_auc_score
 
 from table_unifier.config import Config, EntityResolutionConfig
 from table_unifier.dataset.download import DATASETS, HOLDOUT_DATASETS
 from table_unifier.dataset.pair_sampling import split_labeled_pairs
 from table_unifier.training.er_trainer import (
-    find_duplicates,
     get_row_embeddings,
     train_entity_resolution,
     train_entity_resolution_multidataset,
@@ -52,17 +45,17 @@ logger = logging.getLogger(__name__)
 
 
 # ------------------------------------------------------------------ #
-#  Оценка на тестовом наборе
+#  Оценка на тестовом наборе (threshold-independent)
 # ------------------------------------------------------------------ #
 
-def evaluate_test(
+def evaluate_ranking(
     embeddings: torch.Tensor,
-    test_df: pd.DataFrame,
+    df: pd.DataFrame,
     id_to_global_a: dict[str, int],
     id_to_global_b: dict[str, int],
 ) -> dict:
-    """Вычислить развёрнутые метрики на тестовом наборе (пары A×B)."""
-    positives, negatives = split_labeled_pairs(test_df)
+    """Вычислить threshold-independent метрики (ROC-AUC, Average Precision)."""
+    positives, negatives = split_labeled_pairs(df)
 
     scores: list[float] = []
     labels: list[int] = []
@@ -87,21 +80,7 @@ def evaluate_test(
     scores_arr = np.array(scores)
     labels_arr = np.array(labels)
 
-    best_f1, best_thresh = 0.0, 0.5
-    for thr in np.linspace(scores_arr.min(), scores_arr.max(), 100):
-        preds = (scores_arr >= thr).astype(int)
-        f1 = f1_score(labels_arr, preds, zero_division=0)
-        if f1 > best_f1:
-            best_f1 = f1
-            best_thresh = float(thr)
-
-    preds_best = (scores_arr >= best_thresh).astype(int)
-
     return {
-        "threshold": best_thresh,
-        "precision": float(precision_score(labels_arr, preds_best, zero_division=0)),
-        "recall": float(recall_score(labels_arr, preds_best, zero_division=0)),
-        "f1": float(best_f1),
         "roc_auc": float(roc_auc_score(labels_arr, scores_arr)),
         "avg_precision": float(average_precision_score(labels_arr, scores_arr)),
         "n_pos": int(labels_arr.sum()),
@@ -178,19 +157,12 @@ def run_single_dataset(
 
     test_path = ds_dir / "test.csv"
     if test_path.exists():
-        test_df = pd.read_csv(test_path)
-        metrics = evaluate_test(embeddings, test_df, id_to_global_a, id_to_global_b)
+        metrics = evaluate_ranking(embeddings, pd.read_csv(test_path), id_to_global_a, id_to_global_b)
         result.update(metrics)
         logger.info(
-            "[%s] Test — F1=%.4f, P=%.4f, R=%.4f, ROC-AUC=%.4f (thr=%.3f)",
-            name,
-            metrics.get("f1", 0), metrics.get("precision", 0),
-            metrics.get("recall", 0), metrics.get("roc_auc", 0),
-            metrics.get("threshold", 0.5),
+            "[%s] Test — ROC-AUC=%.4f, AP=%.4f",
+            name, metrics.get("roc_auc", 0), metrics.get("avg_precision", 0),
         )
-
-    duplicates = find_duplicates(embeddings, id_to_global_a, id_to_global_b, threshold=0.7)
-    result["duplicates_found"] = len(duplicates)
 
     return result
 
@@ -248,7 +220,7 @@ def _evaluate_datasets(
     device: str,
     eval_type: str = "in-domain",
 ) -> list[dict]:
-    """Оценить модель на списке датасетов, вернуть результаты."""
+    """Оценить модель на списке датасетов (ROC-AUC, AP)."""
     results: list[dict] = []
     for ds in datasets:
         name = ds["name"]
@@ -276,28 +248,21 @@ def _evaluate_datasets(
                 p = ds_dir / f"{split}.csv"
                 if p.exists():
                     all_dfs.append(pd.read_csv(p))
-            if all_dfs:
-                eval_df = pd.concat(all_dfs, ignore_index=True)
-            else:
-                eval_df = None
+            eval_df = pd.concat(all_dfs, ignore_index=True) if all_dfs else None
         else:
             test_path = ds_dir / "test.csv"
             eval_df = pd.read_csv(test_path) if test_path.exists() else None
 
         if eval_df is not None:
-            metrics = evaluate_test(embeddings, eval_df, id_to_global_a, id_to_global_b)
+            metrics = evaluate_ranking(embeddings, eval_df, id_to_global_a, id_to_global_b)
             result.update(metrics)
             logger.info(
-                "[%s] %s — F1=%.4f, P=%.4f, R=%.4f, ROC-AUC=%.4f (thr=%.3f, n=%d)",
+                "[%s] %s — ROC-AUC=%.4f, AP=%.4f (n=%d)",
                 name, eval_type,
-                metrics.get("f1", 0), metrics.get("precision", 0),
-                metrics.get("recall", 0), metrics.get("roc_auc", 0),
-                metrics.get("threshold", 0.5),
+                metrics.get("roc_auc", 0), metrics.get("avg_precision", 0),
                 metrics.get("n_pos", 0) + metrics.get("n_neg", 0),
             )
 
-        duplicates = find_duplicates(embeddings, id_to_global_a, id_to_global_b, threshold=0.7)
-        result["duplicates_found"] = len(duplicates)
         results.append(result)
 
     return results
@@ -410,19 +375,17 @@ def run_multidataset(
     # Итого
     def _print_results(label: str, results: list[dict]) -> None:
         logger.info("--- %s ---", label)
-        f1s = [r.get("f1", float("nan")) for r in results]
         for r in results:
             logger.info(
-                "  %s | F1=%.4f | P=%.4f | R=%.4f | AUC=%.4f",
+                "  %s | ROC-AUC=%.4f | AP=%.4f",
                 r["name"],
-                r.get("f1", float("nan")),
-                r.get("precision", float("nan")),
-                r.get("recall", float("nan")),
                 r.get("roc_auc", float("nan")),
+                r.get("avg_precision", float("nan")),
             )
-        valid = [f for f in f1s if not np.isnan(f)]
+        aucs = [r.get("roc_auc", float("nan")) for r in results]
+        valid = [a for a in aucs if not np.isnan(a)]
         if valid:
-            logger.info("  Среднее F1: %.4f", np.mean(valid))
+            logger.info("  Среднее ROC-AUC: %.4f", np.mean(valid))
 
     logger.info("=" * 60)
     _print_results("IN-DOMAIN (test split)", in_domain_results)
