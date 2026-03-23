@@ -81,12 +81,16 @@ class EntityResolutionGNN(nn.Module):
         layer: GNNLayer,
         row_x: torch.Tensor,
         token_x: torch.Tensor,
-        t2r_edge_index: torch.Tensor,
         edge_attr_t2r: torch.Tensor,
-        r2t_edge_index: torch.Tensor,
         edge_attr_r2t: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        return layer(row_x, token_x, t2r_edge_index, edge_attr_t2r, r2t_edge_index, edge_attr_r2t)
+        # edge_index хранятся в self._ckpt_* чтобы checkpoint не конвертировал
+        # их из int в float (checkpoint оборачивает только переданные аргументы)
+        return layer(
+            row_x, token_x,
+            self._ckpt_t2r_edge_index, edge_attr_t2r,
+            self._ckpt_r2t_edge_index, edge_attr_r2t,
+        )
 
     def forward(self, data: HeteroData) -> torch.Tensor:
         """
@@ -109,12 +113,16 @@ class EntityResolutionGNN(nn.Module):
 
         for layer in self.gnn_layers:
             if self.gradient_checkpointing and self.training:
+                # Сохраняем edge_index как атрибуты — checkpoint не должен
+                # трогать int-тензоры (иначе конвертирует в float32)
+                self._ckpt_t2r_edge_index = t2r_edge_index
+                self._ckpt_r2t_edge_index = r2t_edge_index
                 row_x, token_x = checkpoint(
                     self._run_gnn_layer,
                     layer,
                     row_x, token_x,
-                    t2r_edge_index, edge_attr_t2r,
-                    r2t_edge_index, edge_attr_r2t,
+                    edge_attr_t2r,
+                    edge_attr_r2t,
                     use_reentrant=False,
                 )
             else:
