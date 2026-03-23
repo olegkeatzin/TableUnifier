@@ -1,8 +1,8 @@
 """Модель Entity Resolution на основе GNN.
 
-Упрощённая архитектура:
+Архитектура:
   1. Проекционные слои (row_proj, token_proj, edge_proj)
-  2. L слоёв GNNLayer (token→row, mean aggregation, edge features)
+  2. L слоёв GNNLayer (mean / transformer, uni / bidirectional)
   3. Output Head (Linear + L2-нормализация)
 
 Выход: [N_rows, D_output] — эмбеддинги строк для Triplet Loss.
@@ -11,6 +11,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 from torch_geometric.data import HeteroData
 
 from table_unifier.models.gnn_layer import GNNLayer
@@ -28,9 +29,13 @@ class EntityResolutionGNN(nn.Module):
         num_gnn_layers: int = 2,
         num_heads: int = 1,
         dropout: float = 0.1,
+        conv_type: str = "mean",
+        bidirectional: bool = False,
+        gradient_checkpointing: bool = False,
     ):
         super().__init__()
         self.num_gnn_layers = num_gnn_layers
+        self.gradient_checkpointing = gradient_checkpointing
 
         # ---- 1. Проекционные слои ---- #
         self.row_proj = nn.Sequential(
@@ -55,7 +60,14 @@ class EntityResolutionGNN(nn.Module):
 
         # ---- 2. GNN слои ---- #
         self.gnn_layers = nn.ModuleList([
-            GNNLayer(hidden_dim, edge_dim, num_heads, dropout)
+            GNNLayer(
+                hidden_dim=hidden_dim,
+                edge_dim=edge_dim,
+                num_heads=num_heads,
+                dropout=dropout,
+                conv_type=conv_type,
+                bidirectional=bidirectional,
+            )
             for _ in range(num_gnn_layers)
         ])
 
@@ -63,6 +75,18 @@ class EntityResolutionGNN(nn.Module):
         self.output_head = nn.Sequential(
             nn.Linear(hidden_dim, output_dim),
         )
+
+    def _run_gnn_layer(
+        self,
+        layer: GNNLayer,
+        row_x: torch.Tensor,
+        token_x: torch.Tensor,
+        t2r_edge_index: torch.Tensor,
+        edge_attr_t2r: torch.Tensor,
+        r2t_edge_index: torch.Tensor,
+        edge_attr_r2t: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return layer(row_x, token_x, t2r_edge_index, edge_attr_t2r, r2t_edge_index, edge_attr_r2t)
 
     def forward(self, data: HeteroData) -> torch.Tensor:
         """
@@ -84,11 +108,21 @@ class EntityResolutionGNN(nn.Module):
         r2t_edge_index = data["row", "has_token", "token"].edge_index
 
         for layer in self.gnn_layers:
-            row_x, token_x = layer(
-                row_x, token_x,
-                t2r_edge_index, edge_attr_t2r,
-                r2t_edge_index, edge_attr_r2t,
-            )
+            if self.gradient_checkpointing and self.training:
+                row_x, token_x = checkpoint(
+                    self._run_gnn_layer,
+                    layer,
+                    row_x, token_x,
+                    t2r_edge_index, edge_attr_t2r,
+                    r2t_edge_index, edge_attr_r2t,
+                    use_reentrant=False,
+                )
+            else:
+                row_x, token_x = layer(
+                    row_x, token_x,
+                    t2r_edge_index, edge_attr_t2r,
+                    r2t_edge_index, edge_attr_r2t,
+                )
 
         output = self.output_head(row_x)
         output = F.normalize(output, p=2, dim=-1)

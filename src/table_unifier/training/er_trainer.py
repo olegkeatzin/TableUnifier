@@ -16,6 +16,24 @@ from table_unifier.models.losses import TripletLoss, mine_semi_hard
 logger = logging.getLogger(__name__)
 
 
+def _build_model(config: EntityResolutionConfig, device: str) -> EntityResolutionGNN:
+    """Создать модель из конфигурации."""
+    return EntityResolutionGNN(
+        row_dim=config.row_dim,
+        token_dim=config.token_dim,
+        col_dim=config.col_dim,
+        hidden_dim=config.hidden_dim,
+        edge_dim=config.edge_dim,
+        output_dim=config.output_dim,
+        num_gnn_layers=config.num_gnn_layers,
+        num_heads=config.num_heads,
+        dropout=config.dropout,
+        conv_type=config.conv_type,
+        bidirectional=config.bidirectional,
+        gradient_checkpointing=config.gradient_checkpointing,
+    ).to(device)
+
+
 def train_entity_resolution(
     data: HeteroData,
     triplet_indices: torch.Tensor,
@@ -41,17 +59,7 @@ def train_entity_resolution(
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 
     # Модель
-    model = EntityResolutionGNN(
-        row_dim=config.row_dim,
-        token_dim=config.token_dim,
-        col_dim=config.col_dim,
-        hidden_dim=config.hidden_dim,
-        edge_dim=config.edge_dim,
-        output_dim=config.output_dim,
-        num_gnn_layers=config.num_gnn_layers,
-        num_heads=config.num_heads,
-        dropout=config.dropout,
-    ).to(device)
+    model = _build_model(config, device)
 
     data = data.to(device)
     triplet_indices = triplet_indices.to(device)
@@ -59,7 +67,9 @@ def train_entity_resolution(
         val_triplet_indices = val_triplet_indices.to(device)
 
     criterion = TripletLoss(margin=config.margin)
-    optimizer = torch.optim.Adam(model.parameters(), lr=config.lr)
+    optimizer = torch.optim.Adam(
+        model.parameters(), lr=config.lr, weight_decay=config.weight_decay,
+    )
 
     best_val_loss = float("inf")
     history: dict[str, list[float]] = {"train_loss": [], "val_loss": []}
@@ -137,6 +147,7 @@ def train_entity_resolution_multidataset(
     config: EntityResolutionConfig | None = None,
     device: str | None = None,
     save_path: Path | None = None,
+    epoch_callback: "Callable[[int, float | None], None] | None" = None,
 ) -> tuple["EntityResolutionGNN", dict]:
     """Round-robin обучение одной GNN на нескольких датасетах.
 
@@ -153,6 +164,9 @@ def train_entity_resolution_multidataset(
         config:    конфигурация.
         device:    устройство (cuda / cpu).
         save_path: путь для сохранения лучшей модели.
+        epoch_callback: вызывается после каждой эпохи как
+            callback(epoch, val_loss). Если выбросит исключение —
+            обучение прерывается (используется для Optuna pruning).
 
     Returns:
         (model, history) где history содержит train_loss, val_loss
@@ -169,20 +183,12 @@ def train_entity_resolution_multidataset(
     config.token_dim = int(sample["token"].x.shape[1])
     config.col_dim = int(sample.col_embeddings.shape[1])
 
-    model = EntityResolutionGNN(
-        row_dim=config.row_dim,
-        token_dim=config.token_dim,
-        col_dim=config.col_dim,
-        hidden_dim=config.hidden_dim,
-        edge_dim=config.edge_dim,
-        output_dim=config.output_dim,
-        num_gnn_layers=config.num_gnn_layers,
-        num_heads=config.num_heads,
-        dropout=config.dropout,
-    ).to(device)
+    model = _build_model(config, device)
 
     criterion = TripletLoss(margin=config.margin)
-    optimizer = torch.optim.Adam(model.parameters(), lr=config.lr)
+    optimizer = torch.optim.Adam(
+        model.parameters(), lr=config.lr, weight_decay=config.weight_decay,
+    )
 
     best_val_loss = float("inf")
     history: dict[str, list] = {"train_loss": [], "val_loss": []}
@@ -267,6 +273,10 @@ def train_entity_resolution_multidataset(
                 "ER [multi] Epoch %d/%d — train_loss=%.4f%s (%d datasets)",
                 epoch, config.epochs, train_loss, val_info, len(datasets),
             )
+
+        # Callback (Optuna pruning и т.д.)
+        if epoch_callback is not None:
+            epoch_callback(epoch, val_loss)
 
     # Сохранить финальную модель (если не было валидации)
     if save_path and not history["val_loss"]:
