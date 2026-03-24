@@ -30,13 +30,11 @@ from pathlib import Path
 import mlflow
 import numpy as np
 import optuna
-import pandas as pd
 import torch
 from sklearn.metrics import average_precision_score, roc_auc_score
 
 from table_unifier.config import Config, EntityResolutionConfig
 from table_unifier.dataset.download import HOLDOUT_DATASETS
-from table_unifier.dataset.pair_sampling import split_labeled_pairs
 from table_unifier.training.er_trainer import (
     get_row_embeddings,
     train_entity_resolution_multidataset,
@@ -77,12 +75,21 @@ def load_all_datasets(
             with open(ds_dir / "stats.json") as f:
                 stats = json.load(f)
 
+            # test_pairs: [N, 3] — (global_a, global_b, label)
+            test_pairs_path = ds_dir / "test_pairs.pt"
+            test_pairs = (
+                torch.load(test_pairs_path, weights_only=False)
+                if test_pairs_path.exists()
+                else torch.zeros((0, 3), dtype=torch.long)
+            )
+
             ds = {
                 "name": name,
                 "domain": stats.get("domain", ""),
                 "graph": graph,
                 "train_triplets": train_tri,
                 "val_triplets": val_tri if len(val_tri) > 0 else None,
+                "test_pairs": test_pairs if len(test_pairs) > 0 else None,
             }
             if name in holdout_set:
                 holdout_datasets.append(ds)
@@ -99,78 +106,43 @@ def load_all_datasets(
 #  Оценка (threshold-independent)
 # ------------------------------------------------------------------ #
 
-def evaluate_ranking(
+def evaluate_from_pairs(
     embeddings: torch.Tensor,
-    df: pd.DataFrame,
-    id_to_global_a: dict[str, int],
-    id_to_global_b: dict[str, int],
+    test_pairs: torch.Tensor,
 ) -> dict:
-    """ROC-AUC и Average Precision на парах из df."""
-    positives, negatives = split_labeled_pairs(df)
-    scores, labels = [], []
-    missing_a, missing_b = 0, 0
-    for a_id, b_id in positives:
-        ga, gb = id_to_global_a.get(a_id), id_to_global_b.get(b_id)
-        if ga is None:
-            missing_a += 1
-        if gb is None:
-            missing_b += 1
-        if ga is not None and gb is not None:
-            scores.append((embeddings[ga] @ embeddings[gb]).item())
-            labels.append(1)
-    for a_id, b_id in negatives:
-        ga, gb = id_to_global_a.get(a_id), id_to_global_b.get(b_id)
-        if ga is None:
-            missing_a += 1
-        if gb is None:
-            missing_b += 1
-        if ga is not None and gb is not None:
-            scores.append((embeddings[ga] @ embeddings[gb]).item())
-            labels.append(0)
-    if not labels:
-        total = len(positives) + len(negatives)
-        logger.warning(
-            "evaluate_ranking: 0/%d пар сматчились (missing_a=%d, missing_b=%d). "
-            "Пример ID из пар: %s | Пример ключей a: %s | b: %s",
-            total, missing_a, missing_b,
-            list(positives[:2]) + list(negatives[:2]),
-            list(id_to_global_a.keys())[:3],
-            list(id_to_global_b.keys())[:3],
-        )
+    """ROC-AUC и Average Precision из предразрешённых пар.
+
+    Args:
+        embeddings: [N_rows, D] — L2-нормализованные эмбеддинги.
+        test_pairs: [M, 3] — (global_a, global_b, label).
+    """
+    if len(test_pairs) == 0:
         return {}
-    scores_arr, labels_arr = np.array(scores), np.array(labels)
+    idx_a = test_pairs[:, 0]
+    idx_b = test_pairs[:, 1]
+    labels = test_pairs[:, 2].numpy()
+    scores = (embeddings[idx_a] * embeddings[idx_b]).sum(dim=1).numpy()
+    if len(np.unique(labels)) < 2:
+        return {}
     return {
-        "roc_auc": float(roc_auc_score(labels_arr, scores_arr)),
-        "avg_precision": float(average_precision_score(labels_arr, scores_arr)),
+        "roc_auc": float(roc_auc_score(labels, scores)),
+        "avg_precision": float(average_precision_score(labels, scores)),
     }
 
 
 def evaluate_model_on_datasets(
-    model, datasets: list[dict], graphs_dir: Path, device: str, eval_type: str,
+    model, datasets: list[dict], device: str,
 ) -> list[dict]:
-    """Оценить модель на списке датасетов."""
+    """Оценить модель на списке датасетов (используя test_pairs тензоры)."""
     results = []
     for ds in datasets:
-        ds_dir = graphs_dir / ds["name"]
+        if ds.get("test_pairs") is None:
+            continue
         embeddings = get_row_embeddings(model, ds["graph"], device=device)
-        with open(ds_dir / "id_to_global_a.json") as f:
-            id_a = json.load(f)
-        with open(ds_dir / "id_to_global_b.json") as f:
-            id_b = json.load(f)
-
-        if eval_type == "cross-domain":
-            dfs = [pd.read_csv(ds_dir / f"{s}.csv") for s in ("train", "valid", "test")
-                   if (ds_dir / f"{s}.csv").exists()]
-            eval_df = pd.concat(dfs, ignore_index=True) if dfs else None
-        else:
-            p = ds_dir / "test.csv"
-            eval_df = pd.read_csv(p) if p.exists() else None
-
-        if eval_df is not None:
-            metrics = evaluate_ranking(embeddings, eval_df, id_a, id_b)
-            if metrics:  # пропускаем датасеты без валидных пар
-                metrics["name"] = ds["name"]
-                results.append(metrics)
+        metrics = evaluate_from_pairs(embeddings, ds["test_pairs"])
+        if metrics:
+            metrics["name"] = ds["name"]
+            results.append(metrics)
     return results
 
 
@@ -181,7 +153,6 @@ def evaluate_model_on_datasets(
 def make_architecture_objective(
     train_datasets: list[dict],
     holdout_datasets: list[dict],
-    graphs_dir: Path,
     device: str,
     hpo_epochs: int,
 ):
@@ -217,6 +188,10 @@ def make_architecture_objective(
                     raise optuna.TrialPruned()
 
         # ---- Обучение ---- #
+        logger.info(
+            "--- Trial %d | hidden=%d edge=%d layers=%d dropout=%.2f bidir=%s ---",
+            trial.number, hidden_dim, edge_dim, num_gnn_layers, dropout, bidirectional,
+        )
         with mlflow.start_run(nested=True, run_name=f"arch_trial_{trial.number}"):
             mlflow.log_params({
                 "hidden_dim": hidden_dim,
@@ -239,10 +214,10 @@ def make_architecture_objective(
 
             # ---- Оценка ---- #
             in_results = evaluate_model_on_datasets(
-                model, train_datasets, graphs_dir, device, "in-domain",
+                model, train_datasets, device,
             )
             cross_results = evaluate_model_on_datasets(
-                model, holdout_datasets, graphs_dir, device, "cross-domain",
+                model, holdout_datasets, device,
             )
 
             in_auc = np.mean([r["roc_auc"] for r in in_results]) if in_results else 0.0
@@ -275,7 +250,6 @@ def make_architecture_objective(
 def make_training_objective(
     train_datasets: list[dict],
     holdout_datasets: list[dict],
-    graphs_dir: Path,
     device: str,
     best_arch: dict,
     hpo_epochs: int,
@@ -307,6 +281,10 @@ def make_training_objective(
                 if trial.should_prune():
                     raise optuna.TrialPruned()
 
+        logger.info(
+            "--- Trial %d | lr=%.1e wd=%.1e margin=%.1f ---",
+            trial.number, lr, weight_decay, margin,
+        )
         with mlflow.start_run(nested=True, run_name=f"train_trial_{trial.number}"):
             mlflow.log_params({"lr": lr, "weight_decay": weight_decay, "margin": margin})
             mlflow.log_params({k: v for k, v in best_arch.items()})
@@ -325,10 +303,10 @@ def make_training_objective(
                 raise optuna.TrialPruned()
 
             in_results = evaluate_model_on_datasets(
-                model, train_datasets, graphs_dir, device, "in-domain",
+                model, train_datasets, device,
             )
             cross_results = evaluate_model_on_datasets(
-                model, holdout_datasets, graphs_dir, device, "cross-domain",
+                model, holdout_datasets, device,
             )
 
             in_auc = np.mean([r["roc_auc"] for r in in_results]) if in_results else 0.0
@@ -362,7 +340,6 @@ def make_training_objective(
 def run_architecture_search(
     train_datasets: list[dict],
     holdout_datasets: list[dict],
-    graphs_dir: Path,
     device: str,
     n_trials: int,
     hpo_epochs: int,
@@ -381,7 +358,7 @@ def run_architecture_search(
         mlflow.log_params({"stage": "architecture", "n_trials": n_trials, "hpo_epochs": hpo_epochs})
 
         objective = make_architecture_objective(
-            train_datasets, holdout_datasets, graphs_dir, device, hpo_epochs,
+            train_datasets, holdout_datasets, device, hpo_epochs,
         )
         study.optimize(objective, n_trials=n_trials)
 
@@ -406,7 +383,6 @@ def run_architecture_search(
 def run_training_search(
     train_datasets: list[dict],
     holdout_datasets: list[dict],
-    graphs_dir: Path,
     device: str,
     best_arch: dict,
     n_trials: int,
@@ -427,7 +403,7 @@ def run_training_search(
         mlflow.log_params({f"arch_{k}": v for k, v in best_arch.items()})
 
         objective = make_training_objective(
-            train_datasets, holdout_datasets, graphs_dir, device, best_arch, hpo_epochs,
+            train_datasets, holdout_datasets, device, best_arch, hpo_epochs,
         )
         study.optimize(objective, n_trials=n_trials)
 
@@ -490,7 +466,7 @@ def main() -> None:
     best_arch = None
     if args.stage in ("architecture", "both"):
         best_arch = run_architecture_search(
-            train_datasets, holdout_datasets, graphs_dir, device,
+            train_datasets, holdout_datasets, device,
             n_trials=args.n_trials, hpo_epochs=args.hpo_epochs,
             output_dir=config.output_dir,
         )
@@ -509,7 +485,7 @@ def main() -> None:
             logger.info("Загружена архитектура из %s", arch_path)
 
         run_training_search(
-            train_datasets, holdout_datasets, graphs_dir, device,
+            train_datasets, holdout_datasets, device,
             best_arch=best_arch,
             n_trials=args.n_trials, hpo_epochs=args.hpo_epochs,
             output_dir=config.output_dir,

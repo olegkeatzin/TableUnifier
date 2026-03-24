@@ -87,13 +87,18 @@ def corrupt_dataframe(
     df: pd.DataFrame,
     row_prob: float = 0.5,
     cell_prob: float = 0.4,
+    skip_columns: tuple[str, ...] = ("id",),
 ) -> pd.DataFrame:
     """Создать «шумную» копию таблицы, портя значения.
 
     Все столбцы приводятся к строковому типу, т.к. corrupt_value возвращает str.
+    Столбцы из skip_columns (по умолчанию 'id') не портятся.
     """
     noisy = df.astype(str).copy()
+    cols_to_corrupt = [c for c in noisy.columns if c not in skip_columns]
     for idx in noisy.index:
         if random.random() < row_prob:
-            noisy.loc[idx] = corrupt_row(noisy.loc[idx], corruption_prob=cell_prob)
+            noisy.loc[idx, cols_to_corrupt] = corrupt_row(
+                noisy.loc[idx, cols_to_corrupt], corruption_prob=cell_prob,
+            )
     return noisy

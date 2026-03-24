@@ -135,8 +135,15 @@ def build_and_save_single(
     column_embeddings = {**col_emb_a, **col_emb_b}
 
     # Индексы ID → позиция в эмбеддинг-матрице
+    # Строим два варианта ключей: по значению id и по порядковому номеру строки
+    # (в некоторых Magellan-датасетах labeled_data ссылается по индексу, а не по id)
     id_to_idx_a = {str(row["id"]): i for i, (_, row) in enumerate(table_a.iterrows())}
     id_to_idx_b = {str(row["id"]): i for i, (_, row) in enumerate(table_b.iterrows())}
+    # Fallback: позиция строки → тот же индекс
+    for i in range(len(table_a)):
+        id_to_idx_a.setdefault(str(i), i)
+    for i in range(len(table_b)):
+        id_to_idx_b.setdefault(str(i), i)
 
     # Hard-negative mining
     positives_train, negatives_train = split_labeled_pairs(splits["train"])
@@ -159,13 +166,41 @@ def build_and_save_single(
         precomputed_row_embeddings_b=row_emb_b,
     )
 
+    # Fallback для id_to_global: порядковый номер → global index
+    id_to_global_a_ext = dict(id_to_global_a)
+    id_to_global_b_ext = dict(id_to_global_b)
+    for i, v in enumerate(id_to_global_a.values()):
+        id_to_global_a_ext.setdefault(str(i), v)
+    for i, v in enumerate(id_to_global_b.values()):
+        id_to_global_b_ext.setdefault(str(i), v)
+
     # Триплеты → индексы в графе
-    train_triplets = build_triplet_indices(hard_triplets_train, id_to_global_a, id_to_global_b)
+    train_triplets = build_triplet_indices(hard_triplets_train, id_to_global_a_ext, id_to_global_b_ext)
     val_triplets = (
-        build_triplet_indices(hard_triplets_val, id_to_global_a, id_to_global_b)
+        build_triplet_indices(hard_triplets_val, id_to_global_a_ext, id_to_global_b_ext)
         if hard_triplets_val
         else torch.zeros((0, 3), dtype=torch.long)
     )
+
+    # Тестовые пары → глобальные индексы [N, 3]: (global_a, global_b, label)
+    test_pairs = torch.zeros((0, 3), dtype=torch.long)
+    if "test" in splits:
+        positives_test, negatives_test = split_labeled_pairs(splits["test"])
+        pairs = []
+        for a_id, b_id in positives_test:
+            ga = id_to_global_a_ext.get(a_id)
+            gb = id_to_global_b_ext.get(b_id)
+            if ga is not None and gb is not None:
+                pairs.append([ga, gb, 1])
+        for a_id, b_id in negatives_test:
+            ga = id_to_global_a_ext.get(a_id)
+            gb = id_to_global_b_ext.get(b_id)
+            if ga is not None and gb is not None:
+                pairs.append([ga, gb, 0])
+        if pairs:
+            test_pairs = torch.tensor(pairs, dtype=torch.long)
+        logger.info("[%s] test_pairs: %d/%d resolved",
+                    name, len(pairs), len(positives_test) + len(negatives_test))
 
     # Сохранение
     out_dir = graphs_dir / name
@@ -174,15 +209,12 @@ def build_and_save_single(
     torch.save(graph, out_dir / "graph.pt")
     torch.save(train_triplets, out_dir / "train_triplets.pt")
     torch.save(val_triplets, out_dir / "val_triplets.pt")
+    torch.save(test_pairs, out_dir / "test_pairs.pt")
 
     with open(out_dir / "id_to_global_a.json", "w") as f:
         json.dump(id_to_global_a, f)
     with open(out_dir / "id_to_global_b.json", "w") as f:
         json.dump(id_to_global_b, f)
-
-    # Копируем test split (нужен для оценки)
-    if "test" in splits:
-        splits["test"].to_csv(out_dir / "test.csv", index=False)
 
     stats = {
         "name": name,
