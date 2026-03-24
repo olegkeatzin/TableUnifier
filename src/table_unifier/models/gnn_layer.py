@@ -33,7 +33,7 @@ class EdgeMeanConv(MessagePassing):
         edge_attr: torch.Tensor,
     ) -> torch.Tensor:
         size = (x_src.size(0), x_dst.size(0))
-        return self.propagate(edge_index, x=x_src, edge_attr=edge_attr, size=size)
+        return self.propagate(edge_index.long(), x=x_src, edge_attr=edge_attr, size=size)
 
     def message(self, x_j: torch.Tensor, edge_attr: torch.Tensor) -> torch.Tensor:
         return self.lin(torch.cat([x_j, edge_attr], dim=-1))
@@ -91,6 +91,10 @@ class GNNLayer(nn.Module):
         r2t_edge_index: torch.Tensor,
         edge_attr_r2t: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        # Гарантируем int dtype (checkpoint может конвертировать в float)
+        t2r_edge_index = t2r_edge_index.long()
+        r2t_edge_index = r2t_edge_index.long()
+
         # Token → Row
         row_msg = self.conv_t2r(token_x, row_x, t2r_edge_index, edge_attr_t2r)
         row_x = self.norm_row(row_x + self.dropout(row_msg))
