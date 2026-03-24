@@ -220,10 +220,10 @@ def make_architecture_objective(
                 model, holdout_datasets, device,
             )
 
-            in_auc = np.mean([r["roc_auc"] for r in in_results]) if in_results else 0.0
-            in_ap = np.mean([r["avg_precision"] for r in in_results]) if in_results else 0.0
-            cross_auc = np.mean([r["roc_auc"] for r in cross_results]) if cross_results else 0.0
-            cross_ap = np.mean([r["avg_precision"] for r in cross_results]) if cross_results else 0.0
+            in_auc = np.mean([r["roc_auc"] for r in in_results if "roc_auc" in r]) or 0.0
+            in_ap = np.mean([r["avg_precision"] for r in in_results if "avg_precision" in r]) or 0.0
+            cross_auc = np.mean([r["roc_auc"] for r in cross_results if "roc_auc" in r]) or 0.0
+            cross_ap = np.mean([r["avg_precision"] for r in cross_results if "avg_precision" in r]) or 0.0
             best_val = min(history["val_loss"]) if history["val_loss"] else float("inf")
 
             mlflow.log_metrics({
