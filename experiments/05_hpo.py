@@ -346,8 +346,11 @@ def run_architecture_search(
     output_dir: Path,
 ) -> dict:
     """Этап 1: подбор архитектуры."""
+    storage = f"sqlite:///{output_dir / 'hpo_optuna.db'}"
     study = optuna.create_study(
         study_name="er_architecture",
+        storage=storage,
+        load_if_exists=True,
         direction="minimize",
         pruner=optuna.pruners.MedianPruner(
             n_startup_trials=5, n_warmup_steps=10,
@@ -390,8 +393,11 @@ def run_training_search(
     output_dir: Path,
 ) -> dict:
     """Этап 2: подбор параметров обучения."""
+    storage = f"sqlite:///{output_dir / 'hpo_optuna.db'}"
     study = optuna.create_study(
         study_name="er_training",
+        storage=storage,
+        load_if_exists=True,
         direction="minimize",
         pruner=optuna.pruners.MedianPruner(
             n_startup_trials=3, n_warmup_steps=10,
