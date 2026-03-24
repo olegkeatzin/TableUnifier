@@ -102,14 +102,14 @@ class EntityResolutionGNN(nn.Module):
 
         # Проецируем col_embeddings ДО индексации
         col_emb_proj = self.edge_proj(data.col_embeddings)  # [n_cols, edge_dim]
-        t2r_col_idx = data["token", "in_row", "row"].edge_col_idx
-        r2t_col_idx = data["row", "has_token", "token"].edge_col_idx
+        t2r_col_idx = data["token", "in_row", "row"].edge_col_idx.long()
+        r2t_col_idx = data["row", "has_token", "token"].edge_col_idx.long()
 
         edge_attr_t2r = col_emb_proj[t2r_col_idx]  # [E, edge_dim]
         edge_attr_r2t = col_emb_proj[r2t_col_idx]  # [E, edge_dim]
 
-        t2r_edge_index = data["token", "in_row", "row"].edge_index
-        r2t_edge_index = data["row", "has_token", "token"].edge_index
+        t2r_edge_index = data["token", "in_row", "row"].edge_index.long()
+        r2t_edge_index = data["row", "has_token", "token"].edge_index.long()
 
         for layer in self.gnn_layers:
             if self.gradient_checkpointing and self.training:
