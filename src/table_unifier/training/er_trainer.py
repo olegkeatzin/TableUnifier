@@ -26,11 +26,8 @@ def _build_model(config: EntityResolutionConfig, device: str) -> EntityResolutio
         edge_dim=config.edge_dim,
         output_dim=config.output_dim,
         num_gnn_layers=config.num_gnn_layers,
-        num_heads=config.num_heads,
         dropout=config.dropout,
-        conv_type=config.conv_type,
         bidirectional=config.bidirectional,
-        gradient_checkpointing=config.gradient_checkpointing,
     ).to(device)
 
 

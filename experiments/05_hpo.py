@@ -1,7 +1,7 @@
 """Эксперимент 5 — Подбор гиперпараметров (Optuna + MLflow).
 
 Два этапа:
-  1. Архитектура: conv_type, hidden_dim, edge_dim, num_gnn_layers, num_heads,
+  1. Архитектура: hidden_dim, edge_dim, num_gnn_layers,
      bidirectional, dropout — при фиксированном lr/margin/epochs.
   2. Обучение: lr, weight_decay, margin — при лучшей архитектуре из этапа 1.
 
@@ -189,31 +189,19 @@ def make_architecture_objective(
 
     def objective(trial: optuna.Trial) -> float:
         # ---- Сэмплирование архитектурных параметров ---- #
-        conv_type = trial.suggest_categorical("conv_type", ["mean", "transformer"])
         hidden_dim = trial.suggest_categorical("hidden_dim", [64, 128, 256])
         edge_dim = trial.suggest_categorical("edge_dim", [32, 64, 128])
         num_gnn_layers = trial.suggest_int("num_gnn_layers", 1, 3)
         dropout = trial.suggest_float("dropout", 0.0, 0.5, step=0.05)
         bidirectional = trial.suggest_categorical("bidirectional", [False, True])
 
-        num_heads = 1
-        if conv_type == "transformer":
-            valid_heads = [h for h in [1, 2, 4] if hidden_dim % h == 0]
-            num_heads = trial.suggest_categorical("num_heads", valid_heads)
-
-        # Для transformer + bidirectional включаем gradient checkpointing
-        gradient_checkpointing = conv_type == "transformer" and bidirectional
-
         # ---- Конфигурация ---- #
         cfg = EntityResolutionConfig(
             hidden_dim=hidden_dim,
             edge_dim=edge_dim,
             num_gnn_layers=num_gnn_layers,
-            num_heads=num_heads,
             dropout=dropout,
-            conv_type=conv_type,
             bidirectional=bidirectional,
-            gradient_checkpointing=gradient_checkpointing,
             # Фиксированные параметры обучения
             lr=1e-3,
             margin=0.3,
@@ -231,11 +219,9 @@ def make_architecture_objective(
         # ---- Обучение ---- #
         with mlflow.start_run(nested=True, run_name=f"arch_trial_{trial.number}"):
             mlflow.log_params({
-                "conv_type": conv_type, "hidden_dim": hidden_dim,
+                "hidden_dim": hidden_dim,
                 "edge_dim": edge_dim, "num_gnn_layers": num_gnn_layers,
-                "num_heads": num_heads, "dropout": dropout,
-                "bidirectional": bidirectional,
-                "gradient_checkpointing": gradient_checkpointing,
+                "dropout": dropout, "bidirectional": bidirectional,
             })
 
             try:
@@ -307,11 +293,8 @@ def make_training_objective(
             hidden_dim=best_arch["hidden_dim"],
             edge_dim=best_arch["edge_dim"],
             num_gnn_layers=best_arch["num_gnn_layers"],
-            num_heads=best_arch.get("num_heads", 1),
             dropout=best_arch["dropout"],
-            conv_type=best_arch["conv_type"],
             bidirectional=best_arch["bidirectional"],
-            gradient_checkpointing=best_arch.get("gradient_checkpointing", False),
             lr=lr,
             margin=margin,
             weight_decay=weight_decay,
