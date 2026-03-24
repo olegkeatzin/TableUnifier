@@ -462,8 +462,8 @@ def main() -> None:
                         default="both", help="Какой этап запустить")
     parser.add_argument("--n-trials", type=int, default=40,
                         help="Число trial-ов Optuna на каждый этап")
-    parser.add_argument("--hpo-epochs", type=int, default=30,
-                        help="Эпох на один trial (меньше чем финальное обучение)")
+    parser.add_argument("--hpo-epochs", type=int, default=50,
+                        help="Эпох на один trial")
     parser.add_argument("--data-dir", default="data")
     parser.add_argument("--output-dir", default="output")
     parser.add_argument("--device", default=None)
