@@ -271,9 +271,13 @@ def train_entity_resolution_multidataset(
                 epoch, config.epochs, train_loss, val_info, len(datasets),
             )
 
-        # Callback (Optuna pruning и т.д.)
+        # Callback (Optuna pruning, early stopping и т.д.)
         if epoch_callback is not None:
-            epoch_callback(epoch, val_loss)
+            try:
+                epoch_callback(epoch, val_loss)
+            except StopIteration:
+                logger.info("Обучение остановлено callback на эпохе %d", epoch)
+                break
 
     # Сохранить финальную модель (если не было валидации)
     if save_path and not history["val_loss"]:

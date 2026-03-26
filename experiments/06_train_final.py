@@ -174,26 +174,33 @@ def load_best_config(output_dir: Path) -> EntityResolutionConfig:
 # ------------------------------------------------------------------ #
 
 class EarlyStopping:
-    """Останавливает обучение, если val_loss не улучшается patience эпох."""
+    """Останавливает обучение, если val_loss не улучшается patience эпох.
+
+    Также собирает историю val_loss по эпохам (на случай прерывания).
+    """
 
     def __init__(self, patience: int = 20):
         self.patience = patience
         self.best_val = float("inf")
+        self.best_epoch = 0
         self.epochs_no_improve = 0
+        self.val_history: list[float] = []
 
     def __call__(self, epoch: int, val_loss: float | None) -> None:
         if val_loss is None:
             return
+        self.val_history.append(val_loss)
         if val_loss < self.best_val:
             self.best_val = val_loss
+            self.best_epoch = epoch
             self.epochs_no_improve = 0
         else:
             self.epochs_no_improve += 1
 
         if self.epochs_no_improve >= self.patience:
             logger.info(
-                "Early stopping: val_loss не улучшался %d эпох (best=%.4f, current=%.4f)",
-                self.patience, self.best_val, val_loss,
+                "Early stopping: val_loss не улучшался %d эпох (best=%.4f @ ep %d, current=%.4f)",
+                self.patience, self.best_val, self.best_epoch, val_loss,
             )
             raise StopIteration("Early stopping")
 
@@ -247,41 +254,19 @@ def main() -> None:
 
     early_stop = EarlyStopping(patience=args.patience)
 
-    try:
-        model, history = train_entity_resolution_multidataset(
-            datasets=train_datasets,
-            config=er_config,
-            device=device,
-            save_path=save_path,
-            epoch_callback=early_stop,
-        )
-    except StopIteration:
-        # Early stopping сработал — модель уже сохранена по лучшему val_loss
-        logger.info("Обучение остановлено early stopping")
-        # Загрузим лучшую модель
-        from table_unifier.models.entity_resolution import EntityResolutionGNN
+    model, history = train_entity_resolution_multidataset(
+        datasets=train_datasets,
+        config=er_config,
+        device=device,
+        save_path=save_path,
+        epoch_callback=early_stop,
+    )
 
-        sample = train_datasets[0]["graph"]
-        er_config.row_dim = int(sample["row"].x.shape[1])
-        er_config.token_dim = int(sample["token"].x.shape[1])
-        er_config.col_dim = int(sample.col_embeddings.shape[1])
-
-        model = EntityResolutionGNN(
-            row_dim=er_config.row_dim,
-            token_dim=er_config.token_dim,
-            col_dim=er_config.col_dim,
-            hidden_dim=er_config.hidden_dim,
-            edge_dim=er_config.edge_dim,
-            output_dim=er_config.output_dim,
-            num_gnn_layers=er_config.num_gnn_layers,
-            dropout=er_config.dropout,
-            bidirectional=er_config.bidirectional,
+    if early_stop.best_epoch > 0:
+        logger.info(
+            "Обучено %d эпох, best val_loss=%.4f @ epoch %d",
+            len(history["train_loss"]), early_stop.best_val, early_stop.best_epoch,
         )
-        model.load_state_dict(torch.load(save_path, map_location=device, weights_only=False))
-        model.to(device)
-        model.eval()
-        # history недоступен после исключения — считаем из early_stop
-        history = {"note": "early_stopped", "best_val_loss": early_stop.best_val}
 
     # 4. Сохранение истории
     history_path = config.output_dir / "er_final_history.json"
