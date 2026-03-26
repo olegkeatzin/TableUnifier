@@ -1,4 +1,4 @@
-"""Эксперимент 6 — Тестирование модели ER на реальных данных.
+"""Эксперимент 7 — Тестирование модели ER на реальных данных.
 
 Сопоставление номенклатуры предприятия (table A, 40K строк)
 со сводной спецификацией (table B, 18K строк) — без разметки.
@@ -12,10 +12,10 @@
 
 Использование:
     # Полный прогон (генерация эмбеддингов + граф + оценка)
-    python -m experiments.06_real_data_test
+    python -m experiments.07_real_data_test
 
     # Пропустить генерацию (если уже есть кеш)
-    python -m experiments.06_real_data_test --skip-embeddings --skip-graph
+    python -m experiments.07_real_data_test --skip-embeddings --skip-graph
 """
 
 from __future__ import annotations
@@ -46,8 +46,8 @@ from table_unifier.training.er_trainer import get_row_embeddings
 logging.basicConfig(level=logging.INFO, format="%(levelname)s | %(name)s | %(message)s")
 logger = logging.getLogger(__name__)
 
-DATA_DIR = Path("experiments/06_real_data_test")
-OUTPUT_DIR = Path("output/06_real_data_test")
+DATA_DIR = Path("experiments/07_real_data_test")
+OUTPUT_DIR = Path("output/07_real_data_test")
 
 BEST_CONFIG = EntityResolutionConfig(
     hidden_dim=128,
