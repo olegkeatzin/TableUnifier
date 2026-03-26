@@ -314,7 +314,7 @@ def find_top_k(
         vals, idxs = sim.topk(min(k, sim.shape[1]), dim=1)
         all_sims.append(vals)
         all_idxs.append(idxs)
-    return torch.cat(all_sims), torch.cat(all_idxs)
+    return torch.cat(all_sims).cpu(), torch.cat(all_idxs).cpu()
 
 
 # ------------------------------------------------------------------ #
@@ -395,7 +395,7 @@ def eval_confidence(
     """Анализ разрыва sim(top-1) vs sim(top-2)."""
     if top_sims.shape[1] < 2:
         return {"error": "K < 2"}
-    gaps = (top_sims[:, 0] - top_sims[:, 1]).numpy()
+    gaps = (top_sims[:, 0] - top_sims[:, 1]).cpu().numpy()
 
     stats = {
         "mean_gap": float(np.mean(gaps)),
