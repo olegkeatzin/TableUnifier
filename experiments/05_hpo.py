@@ -490,12 +490,64 @@ def main() -> None:
                 best_arch = json.load(f)["best_params"]
             logger.info("Загружена архитектура из %s", arch_path)
 
-        run_training_search(
+        best_training = run_training_search(
             train_datasets, holdout_datasets, device,
             best_arch=best_arch,
             n_trials=args.n_trials, hpo_epochs=args.hpo_epochs,
             output_dir=config.output_dir,
         )
+
+    # Этап 3: обучение финальной модели с лучшими параметрами
+    if args.stage in ("training", "both"):
+        # Собираем лучшие параметры
+        if best_arch is None:
+            arch_path = args.arch_from or (config.output_dir / "hpo_architecture.json")
+            with open(Path(arch_path)) as f:
+                best_arch = json.load(f)["best_params"]
+        if "best_training" not in dir():
+            train_path = config.output_dir / "hpo_training.json"
+            if train_path.exists():
+                with open(train_path) as f:
+                    best_training = json.load(f)["best_training"]
+            else:
+                best_training = None
+
+        if best_training is not None:
+            logger.info("=" * 60)
+            logger.info("Этап 3: обучение финальной модели с лучшими параметрами")
+            logger.info("=" * 60)
+
+            final_cfg = EntityResolutionConfig(
+                hidden_dim=best_arch["hidden_dim"],
+                edge_dim=best_arch["edge_dim"],
+                num_gnn_layers=best_arch["num_gnn_layers"],
+                dropout=best_arch["dropout"],
+                bidirectional=best_arch["bidirectional"],
+                lr=best_training["lr"],
+                margin=best_training["margin"],
+                weight_decay=best_training["weight_decay"],
+                epochs=args.hpo_epochs,
+            )
+
+            final_model, final_history = train_entity_resolution_multidataset(
+                datasets=train_datasets,
+                config=final_cfg,
+                device=device,
+                save_path=config.output_dir / "er_model_hpo_best.pt",
+            )
+
+            # Оценка финальной модели
+            in_results = evaluate_model_on_datasets(final_model, train_datasets, device)
+            cross_results = evaluate_model_on_datasets(final_model, holdout_datasets, device)
+            in_auc = np.mean([r["roc_auc"] for r in in_results]) if in_results else 0.0
+            cross_auc = np.mean([r["roc_auc"] for r in cross_results]) if cross_results else 0.0
+
+            logger.info("Финальная модель: in AUC=%.3f | cross AUC=%.3f", in_auc, cross_auc)
+            logger.info("Модель сохранена: %s", config.output_dir / "er_model_hpo_best.pt")
+
+            del final_model
+            torch.cuda.empty_cache()
+            gc.collect()
 
 
 if __name__ == "__main__":
