@@ -9,7 +9,7 @@ from table_unifier.models.gnn_layer import GNNLayer
 class TestGNNLayer:
     @pytest.fixture()
     def layer(self):
-        return GNNLayer(hidden_dim=32, edge_dim=16, num_heads=4, dropout=0.0)
+        return GNNLayer(hidden_dim=32, edge_dim=16, dropout=0.0)
 
     @pytest.fixture()
     def graph_tensors(self):
@@ -60,5 +60,5 @@ class TestGNNLayer:
 
     def test_odd_hidden_dim(self):
         # Простая архитектура не требует деления на heads
-        layer = GNNLayer(hidden_dim=33, edge_dim=16, num_heads=1)
+        layer = GNNLayer(hidden_dim=33, edge_dim=16)
         assert layer is not None

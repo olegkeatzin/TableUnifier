@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(xargs wc:*)",
+      "Bash(find /c/Users/olegk/Desktop/ДИПЛОМ/СуперДиплом/TableUnifier/src/table_unifier -type f -name \"*.py\" -exec wc -l {} +)",
+      "Bash(find 'c:/obsidian-vault/Диплом TableUnifier/Dataset' -type f -name *.md)",
+      "mcp__MCP_DOCKER__mcp-find",
+      "Bash(find C:UsersolegkDesktopДИПЛОМСуперДипломTableUnifier -type f -name *.md -o -name *.txt -o -name *.py -o -name *.toml -o -name *.cfg -o -name *.yaml -o -name *.yml -o -name *.json)",
+      "Bash(uv sync:*)",
+      "Bash(uv run:*)",
+      "Bash(uv add:*)",
+      "Bash(uv pip:*)"
+    ]
+  }
+}

@@ -213,8 +213,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Обучение финальной модели ER")
     parser.add_argument("--max-epochs", type=int, default=500,
                         help="Максимум эпох (по умолчанию 500)")
-    parser.add_argument("--patience", type=int, default=20,
-                        help="Early stopping patience (по умолчанию 20)")
+    parser.add_argument("--patience", type=int, default=30,
+                        help="Early stopping patience (по умолчанию 30)")
     parser.add_argument("--data-dir", default="data")
     parser.add_argument("--output-dir", default="output")
     parser.add_argument("--device", default=None)

@@ -17,7 +17,6 @@ class TestEntityResolutionGNN:
             edge_dim=16,
             output_dim=16,
             num_gnn_layers=2,
-            num_heads=1,
             dropout=0.0,
         )
 

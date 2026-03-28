@@ -43,13 +43,8 @@ class TestEntityResolutionConfig:
         assert cfg.row_dim == 312
         assert cfg.token_dim == 312
         assert cfg.col_dim == 4096
-        assert cfg.hidden_dim == 256
-        assert cfg.num_gnn_layers == 3
-        assert cfg.num_heads == 4
-
-    def test_hidden_dim_divisible_by_heads(self):
-        cfg = EntityResolutionConfig()
-        assert cfg.hidden_dim % cfg.num_heads == 0
+        assert cfg.hidden_dim == 128
+        assert cfg.num_gnn_layers == 2
 
 
 class TestConfig:

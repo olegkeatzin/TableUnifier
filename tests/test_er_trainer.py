@@ -23,7 +23,6 @@ def er_config():
         edge_dim=16,
         output_dim=16,
         num_gnn_layers=1,
-        num_heads=4,
         dropout=0.0,
         epochs=2,
         batch_size=8,
@@ -88,7 +87,6 @@ class TestGetRowEmbeddings:
             edge_dim=er_config.edge_dim,
             output_dim=er_config.output_dim,
             num_gnn_layers=er_config.num_gnn_layers,
-            num_heads=er_config.num_heads,
             dropout=er_config.dropout,
         )
         emb = get_row_embeddings(model, small_hetero_data, device="cpu")

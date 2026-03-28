@@ -44,6 +44,8 @@ class EntityResolutionConfig:
     epochs: int = 50
     batch_size: int = 32
     bidirectional: bool = False
+    num_heads: int = 4
+    attention_dropout: float = 0.1
 
 
 @dataclass

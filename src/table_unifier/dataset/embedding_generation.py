@@ -130,9 +130,12 @@ class TokenEmbedder:
 
     # ----- Token (vocabulary) embeddings ----- #
 
-    def get_token_ids(self, text: str) -> list[int]:
+    def get_token_ids(self, text: str, max_length: int = 2048) -> list[int]:
         """Токенизировать текст, вернуть ID токенов (без спец-токенов)."""
-        encoding = self.tokenizer(text, add_special_tokens=False)
+        encoding = self.tokenizer(
+            text, add_special_tokens=False,
+            truncation=True, max_length=max_length,
+        )
         return encoding["input_ids"]
 
     def get_vocab_embedding(self, token_id: int) -> np.ndarray:
