@@ -1,8 +1,9 @@
-"""Цикл обучения модели Entity Resolution (GNN + Triplet Loss)."""
+"""Цикл обучения модели Entity Resolution (GNN + NT-Xent / Triplet Loss)."""
 
 from __future__ import annotations
 
 import logging
+import math
 from pathlib import Path
 
 import torch
@@ -11,7 +12,7 @@ from tqdm import tqdm
 
 from table_unifier.config import EntityResolutionConfig
 from table_unifier.models.entity_resolution import EntityResolutionGNN
-from table_unifier.models.losses import TripletLoss, mine_semi_hard
+from table_unifier.models.losses import TripletLoss, mine_semi_hard, nt_xent_loss
 
 logger = logging.getLogger(__name__)
 
@@ -329,11 +330,14 @@ def train_entity_resolution_minibatch(
     epoch_callback: "Callable[[int, float | None], None] | None" = None,
     model_class: str = "gat",
 ) -> tuple["nn.Module", dict]:
-    """Mini-batch обучени�� ER на объеди��ённом графе.
+    """Mini-batch обучение ER на объединённом графе с NT-Xent loss.
 
-    Граф хранится в CPU RAM. На каждом шаге NeighborLoader
-    сэмплирует подграф для батча seed-узлов (строки из триплетов),
-    подграф загружается на GPU для forward + backward.
+    Изменения по результатам ресёрча (GNN_Research_Report.docx):
+      - NT-Xent вместо Triplet Loss: O(N) негативов на якорь
+      - AdamW вместо Adam: decoupled weight decay
+      - CosineAnnealingWarmRestarts: warmup + cosine decay
+      - Gradient clipping: max_norm=1.0
+      - Val loss = NT-Xent (та же формула что и train)
 
     Args:
         graph:        HeteroData — объединённый граф (в CPU)
@@ -372,21 +376,42 @@ def train_entity_resolution_minibatch(
     else:
         model = _build_model(config, device)
 
-    criterion = TripletLoss(margin=config.margin)
-    optimizer = torch.optim.Adam(model.parameters(), lr=config.lr, weight_decay=config.weight_decay)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=10, min_lr=1e-6)
+    # AdamW с decoupled weight decay (раздел 2.1 ресёрча)
+    optimizer = torch.optim.AdamW(
+        model.parameters(), lr=config.lr, weight_decay=config.weight_decay,
+    )
 
-    # Формируем триплеты из labeled pairs
+    # CosineAnnealingWarmRestarts (раздел 2.2 ресёрча)
+    # Warmup через линейный рост lr первые warmup_ratio * epochs эпох
+    warmup_epochs = max(1, int(config.epochs * config.warmup_ratio))
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+        optimizer, T_0=config.epochs - warmup_epochs, T_mult=1, eta_min=1e-6,
+    )
+
+    # Позитивные пары для NT-Xent
     pos_mask = train_pairs[:, 2] == 1
-    neg_mask = train_pairs[:, 2] == 0
-    pos_pairs = train_pairs[pos_mask]
-    neg_pairs = train_pairs[neg_mask]
+    train_pos_pairs = train_pairs[pos_mask][:, :2]  # [P, 2] — (idx_a, idx_b)
+
+    # Val позитивные пары
+    val_pos_pairs = None
+    if val_pairs is not None and len(val_pairs) > 0:
+        val_pos_mask = val_pairs[:, 2] == 1
+        if val_pos_mask.sum() > 0:
+            val_pos_pairs = val_pairs[val_pos_mask][:, :2]
+
+    # Seed nodes = все строки из позитивных пар
+    all_train_rows = torch.unique(torch.cat([train_pos_pairs[:, 0], train_pos_pairs[:, 1]]))
 
     # NeighborLoader: сколько соседей сэмплировать на каждом слое
+    # 16 вместо 32 — снижает размер подграфа в ~4x, экономит VRAM
     num_neighbors = {
-        ("token", "in_row", "row"): [32] * config.num_gnn_layers,
-        ("row", "has_token", "token"): [32] * config.num_gnn_layers,
+        ("token", "in_row", "row"): [16] * config.num_gnn_layers,
+        ("row", "has_token", "token"): [16] * config.num_gnn_layers,
     }
+
+    # Mixed precision — x2 экономия VRAM на forward/backward
+    use_amp = device != "cpu"
+    scaler = torch.amp.GradScaler(enabled=use_amp)
 
     best_val_loss = float("inf")
     history: dict[str, list] = {"train_loss": [], "val_loss": [], "lr": []}
@@ -394,29 +419,21 @@ def train_entity_resolution_minibatch(
     for epoch in range(1, config.epochs + 1):
         model.train()
 
-        # Генерируем триплеты для этой эпохи
-        rng = torch.Generator().manual_seed(epoch)
-        if len(neg_pairs) > 0:
-            neg_idx = torch.randint(0, len(neg_pairs), (len(pos_pairs),), generator=rng)
-            triplet_a = pos_pairs[:, 0]
-            triplet_p = pos_pairs[:, 1]
-            triplet_n = neg_pairs[neg_idx, 1]
+        # Warmup: линейно увеличиваем lr от 0 до peak_lr
+        if epoch <= warmup_epochs:
+            warmup_factor = epoch / warmup_epochs
+            for pg in optimizer.param_groups:
+                pg["lr"] = config.lr * warmup_factor
         else:
-            all_b = torch.unique(train_pairs[:, 1])
-            triplet_a = pos_pairs[:, 0]
-            triplet_p = pos_pairs[:, 1]
-            triplet_n = all_b[torch.randint(0, len(all_b), (len(pos_pairs),), generator=rng)]
-
-        # Seed nodes = все строки из триплетов
-        seed_rows = torch.unique(torch.cat([triplet_a, triplet_p, triplet_n]))
+            scheduler.step(epoch - warmup_epochs)
 
         # NeighborLoader для подграфа
         loader = NeighborLoader(
             graph,
             num_neighbors=num_neighbors,
-            input_nodes=("row", seed_rows),
-            batch_size=min(config.batch_size, len(seed_rows)),
-            shuffle=False,
+            input_nodes=("row", all_train_rows),
+            batch_size=min(config.batch_size, len(all_train_rows)),
+            shuffle=True,
         )
 
         epoch_loss = 0.0
@@ -424,37 +441,273 @@ def train_entity_resolution_minibatch(
 
         for batch in loader:
             batch = batch.to(device)
-            embeddings = model(batch)
 
-            # Маппинг: global row idx → local idx в батче
-            global_to_local = {gid.item(): local for local, gid in enumerate(batch["row"].n_id)}
+            with torch.amp.autocast("cuda", enabled=use_amp):
+                all_embeddings = model(batch)
 
-            # Фильтруем триплеты где все 3 строки в батче
-            batch_triplets = []
-            for a, p, n in zip(triplet_a.tolist(), triplet_p.tolist(), triplet_n.tolist()):
-                if a in global_to_local and p in global_to_local and n in global_to_local:
-                    batch_triplets.append([global_to_local[a], global_to_local[p], global_to_local[n]])
+                # Seed-строки = первые batch_size в n_id (гарантия NeighborLoader)
+                n_seeds = batch["row"].batch_size
+                seed_embeddings = all_embeddings[:n_seeds]
+                seed_n_ids = batch["row"].n_id[:n_seeds]
 
-            if not batch_triplets:
+                # Маппинг: global row idx → local idx среди seed-строк
+                seed_to_local = {gid.item(): local for local, gid in enumerate(seed_n_ids)}
+
+                # Фильтруем позитивные пары где обе строки — seeds
+                batch_pos = []
+                for a, p in train_pos_pairs.tolist():
+                    if a in seed_to_local and p in seed_to_local:
+                        batch_pos.append([seed_to_local[a], seed_to_local[p]])
+
+                if not batch_pos:
+                    batch.to("cpu")
+                    continue
+
+                bp = torch.tensor(batch_pos, device=device)
+                # NT-Xent по seed-строкам (~256), не по всему подграфу (~70K)
+                loss = nt_xent_loss(seed_embeddings, bp, temperature=config.temperature)
+
+            optimizer.zero_grad()
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            scaler.step(optimizer)
+            scaler.update()
+
+            epoch_loss += loss.item()
+            n_batches += 1
+            batch.to("cpu")
+            torch.cuda.empty_cache()
+
+        train_loss = epoch_loss / max(n_batches, 1)
+        history["train_loss"].append(train_loss)
+
+        # Validation: NT-Xent на val пар (та же формула что train)
+        val_loss = None
+        if val_pos_pairs is not None and len(val_pos_pairs) > 0:
+            model.eval()
+            val_seed = torch.unique(torch.cat([val_pos_pairs[:, 0], val_pos_pairs[:, 1]]))
+            val_loader = NeighborLoader(
+                graph, num_neighbors=num_neighbors,
+                input_nodes=("row", val_seed),
+                batch_size=min(512, len(val_seed)),
+                shuffle=False,
+            )
+
+            val_loss_sum = 0.0
+            val_count = 0
+
+            with torch.no_grad():
+                for batch in val_loader:
+                    batch = batch.to(device)
+                    with torch.amp.autocast("cuda", enabled=use_amp):
+                        val_all_emb = model(batch)
+
+                    n_seeds = batch["row"].batch_size
+                    val_seed_emb = val_all_emb[:n_seeds]
+                    val_seed_ids = batch["row"].n_id[:n_seeds]
+                    seed_to_local = {gid.item(): local for local, gid in enumerate(val_seed_ids)}
+
+                    batch_val_pos = []
+                    for a, p in val_pos_pairs.tolist():
+                        if a in seed_to_local and p in seed_to_local:
+                            batch_val_pos.append([seed_to_local[a], seed_to_local[p]])
+
+                    if batch_val_pos:
+                        bvp = torch.tensor(batch_val_pos, device=device)
+                        vl = nt_xent_loss(val_seed_emb.float(), bvp, temperature=config.temperature)
+                        val_loss_sum += vl.item() * len(batch_val_pos)
+                        val_count += len(batch_val_pos)
+
+                    batch.to("cpu")
+                    torch.cuda.empty_cache()
+
+            val_loss = val_loss_sum / max(val_count, 1) if val_count > 0 else None
+
+        if val_loss is not None:
+            history["val_loss"].append(val_loss)
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                if save_path:
+                    save_path.parent.mkdir(parents=True, exist_ok=True)
+                    torch.save(model.state_dict(), save_path)
+
+        current_lr = optimizer.param_groups[0]["lr"]
+        history["lr"].append(current_lr)
+
+        val_info = f", val_loss={val_loss:.4f}" if val_loss is not None else ""
+        if epoch % 5 == 0 or epoch == 1:
+            logger.info("ER [minibatch] Epoch %d/%d — train_loss=%.4f%s, lr=%.2e",
+                        epoch, config.epochs, train_loss, val_info, current_lr)
+
+        if epoch_callback is not None:
+            try:
+                epoch_callback(epoch, val_loss)
+            except StopIteration:
+                logger.info("Обучение остановлено callback на эпохе %d", epoch)
+                break
+
+    # Загрузить лучший checkpoint
+    if save_path and save_path.exists() and history["val_loss"]:
+        model.load_state_dict(torch.load(save_path, map_location=device, weights_only=True))
+        logger.info("Загружен лучший checkpoint (val_loss=%.4f)", best_val_loss)
+
+    # Сохранить историю
+    if save_path:
+        import json as _json
+        history_path = save_path.with_suffix(".history.json")
+        with open(history_path, "w", encoding="utf-8") as f:
+            _json.dump(history, f)
+
+    return model, history
+
+
+# ------------------------------------------------------------------ #
+#  BCE обучение (классификация пар)
+# ------------------------------------------------------------------ #
+
+
+def train_entity_resolution_bce(
+    graph: HeteroData,
+    train_pairs: torch.Tensor,
+    val_pairs: torch.Tensor | None = None,
+    config: EntityResolutionConfig | None = None,
+    device: str | None = None,
+    save_path: Path | None = None,
+    epoch_callback: "Callable[[int, float | None], None] | None" = None,
+    model_class: str = "gat",
+) -> tuple["nn.Module", dict]:
+    """Mini-batch обучение ER с BCE loss (классификация пар).
+
+    Вместо метрического обучения (Triplet/NT-Xent) использует явный
+    classification head: MLP(|emb_a - emb_b|) → Sigmoid → BCE.
+    Подход из Ditto (VLDB 2021) и большинства SOTA методов ER.
+
+    Args:
+        graph:        HeteroData — объединённый граф (в CPU)
+        train_pairs:  [N, 3] — (idx_a, idx_b, label), label=1 positive
+        val_pairs:    [M, 3] — аналогично, для валидации
+        config:       EntityResolutionConfig
+        device:       cuda / cpu
+        save_path:    путь сохранения лучшей модели
+        epoch_callback: для early stopping / pruning
+        model_class:  "gat" или "gnn"
+
+    Returns:
+        (model, history) — model это PairClassifier (backbone + head)
+    """
+    import torch.nn as nn
+    from torch_geometric.loader import NeighborLoader
+    from table_unifier.models.entity_resolution import PairClassifier
+
+    config = config or EntityResolutionConfig()
+    device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+
+    # Размерности из графа
+    config.row_dim = int(graph["row"].x.shape[1])
+    config.token_dim = int(graph["token"].x.shape[1])
+    config.col_dim = int(graph.col_embeddings.shape[1])
+
+    # Backbone
+    if model_class == "gat":
+        from table_unifier.models.entity_resolution import EntityResolutionGAT
+        backbone = EntityResolutionGAT(
+            row_dim=config.row_dim, token_dim=config.token_dim, col_dim=config.col_dim,
+            hidden_dim=config.hidden_dim, edge_dim=config.edge_dim, output_dim=config.output_dim,
+            num_gnn_layers=config.num_gnn_layers, num_heads=config.num_heads,
+            dropout=config.dropout, attention_dropout=config.attention_dropout,
+            bidirectional=config.bidirectional,
+        )
+    else:
+        backbone = EntityResolutionGNN(
+            row_dim=config.row_dim, token_dim=config.token_dim, col_dim=config.col_dim,
+            hidden_dim=config.hidden_dim, edge_dim=config.edge_dim, output_dim=config.output_dim,
+            num_gnn_layers=config.num_gnn_layers, dropout=config.dropout,
+            bidirectional=config.bidirectional,
+        )
+
+    model = PairClassifier(backbone, embedding_dim=config.output_dim).to(device)
+
+    criterion = nn.BCEWithLogitsLoss()
+    optimizer = torch.optim.AdamW(
+        model.parameters(), lr=config.lr, weight_decay=config.weight_decay,
+    )
+
+    warmup_epochs = max(1, int(config.epochs * config.warmup_ratio))
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+        optimizer, T_0=config.epochs - warmup_epochs, T_mult=1, eta_min=1e-6,
+    )
+
+    # Все строки из пар
+    all_train_rows = torch.unique(torch.cat([train_pairs[:, 0], train_pairs[:, 1]]))
+
+    num_neighbors = {
+        ("token", "in_row", "row"): [16] * config.num_gnn_layers,
+        ("row", "has_token", "token"): [16] * config.num_gnn_layers,
+    }
+
+    use_amp = device != "cpu"
+    scaler = torch.amp.GradScaler(enabled=use_amp)
+
+    best_val_loss = float("inf")
+    history: dict[str, list] = {"train_loss": [], "val_loss": [], "lr": []}
+
+    for epoch in range(1, config.epochs + 1):
+        model.train()
+
+        # Warmup
+        if epoch <= warmup_epochs:
+            warmup_factor = epoch / warmup_epochs
+            for pg in optimizer.param_groups:
+                pg["lr"] = config.lr * warmup_factor
+        else:
+            scheduler.step(epoch - warmup_epochs)
+
+        loader = NeighborLoader(
+            graph,
+            num_neighbors=num_neighbors,
+            input_nodes=("row", all_train_rows),
+            batch_size=min(config.batch_size, len(all_train_rows)),
+            shuffle=True,
+        )
+
+        epoch_loss = 0.0
+        n_batches = 0
+
+        for batch in loader:
+            batch = batch.to(device)
+
+            # Seed-строки (BCE использует все пары, не только pos)
+            n_seeds = batch["row"].batch_size
+            seed_n_ids = batch["row"].n_id[:n_seeds]
+            seed_to_local = {gid.item(): local for local, gid in enumerate(seed_n_ids)}
+
+            # Фильтруем пары где обе строки — seeds
+            batch_pairs_list = []
+            batch_labels_list = []
+            for row in train_pairs:
+                a, b, label = row[0].item(), row[1].item(), row[2].item()
+                if a in seed_to_local and b in seed_to_local:
+                    batch_pairs_list.append([seed_to_local[a], seed_to_local[b]])
+                    batch_labels_list.append(float(label))
+
+            if not batch_pairs_list:
                 batch.to("cpu")
                 continue
 
-            bt = torch.tensor(batch_triplets, device=device)
-            a_emb = embeddings[bt[:, 0]]
-            p_emb = embeddings[bt[:, 1]]
-            n_emb = embeddings[bt[:, 2]]
+            bp = torch.tensor(batch_pairs_list, device=device)
+            bl = torch.tensor(batch_labels_list, device=device)
 
-            # Semi-hard mining
-            a_mined, p_mined, n_mined = mine_semi_hard(
-                embeddings, bt, margin=config.margin,
-            )
-            if a_mined.shape[0] == 0:
-                a_mined, p_mined, n_mined = a_emb, p_emb, n_emb
+            with torch.amp.autocast("cuda", enabled=use_amp):
+                preds = model(batch, bp)
+                loss = criterion(preds, bl)
 
-            loss = criterion(a_mined, p_mined, n_mined)
             optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            scaler.step(optimizer)
+            scaler.update()
 
             epoch_loss += loss.item()
             n_batches += 1
@@ -468,45 +721,48 @@ def train_entity_resolution_minibatch(
         val_loss = None
         if val_pairs is not None and len(val_pairs) > 0:
             model.eval()
-            val_pos = val_pairs[val_pairs[:, 2] == 1]
-            val_neg = val_pairs[val_pairs[:, 2] == 0]
+            val_seed = torch.unique(torch.cat([val_pairs[:, 0], val_pairs[:, 1]]))
+            val_loader = NeighborLoader(
+                graph, num_neighbors=num_neighbors,
+                input_nodes=("row", val_seed),
+                batch_size=min(512, len(val_seed)),
+                shuffle=False,
+            )
 
-            if len(val_pos) > 0 and len(val_neg) > 0:
-                val_seed = torch.unique(torch.cat([val_pairs[:, 0], val_pairs[:, 1]]))
-                val_loader = NeighborLoader(
-                    graph, num_neighbors=num_neighbors,
-                    input_nodes=("row", val_seed),
-                    batch_size=min(512, len(val_seed)),
-                    shuffle=False,
-                )
+            val_loss_sum = 0.0
+            val_count = 0
 
-                val_loss_sum = 0.0
-                val_count = 0
+            with torch.no_grad():
+                for batch in val_loader:
+                    batch = batch.to(device)
+                    n_seeds = batch["row"].batch_size
+                    seed_n_ids = batch["row"].n_id[:n_seeds]
+                    seed_to_local = {gid.item(): local for local, gid in enumerate(seed_n_ids)}
 
-                with torch.no_grad():
-                    for batch in val_loader:
-                        batch = batch.to(device)
-                        val_emb = model(batch)
-                        global_to_local = {gid.item(): local for local, gid in enumerate(batch["row"].n_id)}
+                    batch_val_pairs = []
+                    batch_val_labels = []
+                    for row in val_pairs:
+                        a, b, label = row[0].item(), row[1].item(), row[2].item()
+                        if a in seed_to_local and b in seed_to_local:
+                            batch_val_pairs.append([seed_to_local[a], seed_to_local[b]])
+                            batch_val_labels.append(float(label))
 
-                        for row in val_pairs:
-                            a, b, label = row[0].item(), row[1].item(), row[2].item()
-                            if a in global_to_local and b in global_to_local:
-                                ea = val_emb[global_to_local[a]]
-                                eb = val_emb[global_to_local[b]]
-                                sim = (ea * eb).sum().item()
-                                if label == 1:
-                                    val_loss_sum += max(0, 1 - sim)
-                                val_count += 1
+                    if batch_val_pairs:
+                        bvp = torch.tensor(batch_val_pairs, device=device)
+                        bvl = torch.tensor(batch_val_labels, device=device)
+                        with torch.amp.autocast("cuda", enabled=use_amp):
+                            preds = model(batch, bvp)
+                            vl = criterion(preds, bvl)
+                        val_loss_sum += vl.item() * len(batch_val_pairs)
+                        val_count += len(batch_val_pairs)
 
-                        batch.to("cpu")
-                        torch.cuda.empty_cache()
+                    batch.to("cpu")
+                    torch.cuda.empty_cache()
 
-                val_loss = val_loss_sum / max(val_count, 1) if val_count > 0 else None
+            val_loss = val_loss_sum / max(val_count, 1) if val_count > 0 else None
 
         if val_loss is not None:
             history["val_loss"].append(val_loss)
-            scheduler.step(val_loss)
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 if save_path:
@@ -518,7 +774,7 @@ def train_entity_resolution_minibatch(
 
         val_info = f", val_loss={val_loss:.4f}" if val_loss is not None else ""
         if epoch % 5 == 0 or epoch == 1:
-            logger.info("ER [minibatch] Epoch %d/%d — train_loss=%.4f%s, lr=%.2e",
+            logger.info("ER [BCE] Epoch %d/%d — train_loss=%.4f%s, lr=%.2e",
                         epoch, config.epochs, train_loss, val_info, current_lr)
 
         if epoch_callback is not None:

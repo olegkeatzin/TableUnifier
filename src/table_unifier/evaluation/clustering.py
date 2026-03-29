@@ -1,88 +1,128 @@
 # src/table_unifier/evaluation/clustering.py
-"""HDBSCAN кластеризация эмбеддингов и метрики оценки."""
+"""Threshold-based evaluation for Entity Resolution.
+
+Production pipeline:
+  1. GNN produces L2-normalised row embeddings
+  2. Cosine similarity between candidate pairs
+  3. Threshold θ → match / no-match
+
+Evaluation:
+  - find_best_threshold(): sweep on val pairs → θ that maximises F1
+  - evaluate_pairs_at_threshold(): apply θ to test pairs → P / R / F1
+  - evaluate_pairs_auc(): ROC-AUC + Average Precision (threshold-free)
+"""
 
 from __future__ import annotations
 
 import logging
 
-import hdbscan
 import numpy as np
 import torch
-from sklearn.metrics import adjusted_rand_score, normalized_mutual_info_score
+from sklearn.metrics import (
+    average_precision_score,
+    f1_score,
+    precision_recall_curve,
+    precision_score,
+    recall_score,
+    roc_auc_score,
+)
 
 logger = logging.getLogger(__name__)
 
 
 def cluster_embeddings(
-    embeddings: torch.Tensor,
-    min_cluster_size: int = 10,
-    min_samples: int | None = None,
+    embeddings: torch.Tensor | np.ndarray,
+    min_cluster_size: int = 15,
     metric: str = "euclidean",
 ) -> np.ndarray:
-    """Кластеризация эмбеддингов через HDBSCAN.
-
-    Args:
-        embeddings: [N, D] tensor (L2-normalized рекомендуется)
-        min_cluster_size: минимальный размер кластера
-        min_samples: минимальное число точек в окрестности (default=min_cluster_size)
-        metric: метрика расстояния
+    """Cluster row embeddings with HDBSCAN.
 
     Returns:
-        labels: [N] numpy array, -1 = шум
+        Integer label array (length = n_rows). Label -1 means noise.
     """
-    X = embeddings.detach().cpu().numpy().astype(np.float64)
+    import hdbscan
 
-    clusterer = hdbscan.HDBSCAN(
-        min_cluster_size=min_cluster_size,
-        min_samples=min_samples,
-        metric=metric,
-        core_dist_n_jobs=-1,
+    if isinstance(embeddings, torch.Tensor):
+        embeddings = embeddings.detach().cpu().numpy()
+
+    clusterer = hdbscan.HDBSCAN(min_cluster_size=min_cluster_size, metric=metric)
+    return clusterer.fit_predict(embeddings)
+
+
+def _cosine_scores(embeddings: torch.Tensor, pairs: torch.Tensor) -> np.ndarray:
+    """Cosine similarity for each pair (embeddings already L2-normalised)."""
+    idx_a = pairs[:, 0]
+    idx_b = pairs[:, 1]
+    return (embeddings[idx_a] * embeddings[idx_b]).sum(dim=1).numpy()
+
+
+def find_best_threshold(
+    embeddings: torch.Tensor,
+    val_pairs: torch.Tensor,
+    n_thresholds: int = 200,
+) -> tuple[float, float]:
+    """Find cosine similarity threshold that maximises F1 on validation pairs.
+
+    Returns:
+        (best_threshold, best_f1)
+    """
+    scores = _cosine_scores(embeddings, val_pairs)
+    labels = val_pairs[:, 2].numpy()
+
+    if len(np.unique(labels)) < 2:
+        logger.warning("Val pairs have single class — returning default threshold 0.5")
+        return 0.5, 0.0
+
+    precision, recall, thresholds = precision_recall_curve(labels, scores)
+    # precision_recall_curve returns len(thresholds) = len(precision) - 1
+    f1_scores = np.where(
+        (precision[:-1] + recall[:-1]) > 0,
+        2 * precision[:-1] * recall[:-1] / (precision[:-1] + recall[:-1]),
+        0.0,
     )
-    labels = clusterer.fit_predict(X)
-
-    n_clusters = len(set(labels)) - (1 if -1 in labels else 0)
-    n_noise = (labels == -1).sum()
-    logger.info("HDBSCAN: %d кластеров, %d шум (%.1f%%)",
-                n_clusters, n_noise, 100 * n_noise / len(labels))
-
-    return labels
+    best_idx = np.argmax(f1_scores)
+    return float(thresholds[best_idx]), float(f1_scores[best_idx])
 
 
-def evaluate_clusters(
-    labels: np.ndarray,
-    ground_truth: np.ndarray | None = None,
+def evaluate_pairs_at_threshold(
+    embeddings: torch.Tensor,
+    pairs: torch.Tensor,
+    threshold: float,
 ) -> dict:
-    """Оценить качество кластеризации.
+    """Apply threshold to pairs → Precision, Recall, F1.
 
-    Args:
-        labels: [N] — метки кластеров (-1 = шум)
-        ground_truth: [N] — истинные метки (опционально)
-
-    Returns:
-        dict с метриками:
-        - coverage: доля точек не в шуме
-        - n_clusters: число кластеров
-        - noise_ratio: доля шума
-        - ari: Adjusted Rand Index (если есть ground_truth)
-        - nmi: Normalized Mutual Info (если есть ground_truth)
+    This mirrors the production decision: sim >= θ → duplicate.
     """
-    n_total = len(labels)
-    n_noise = int((labels == -1).sum())
-    n_clusters = len(set(labels)) - (1 if -1 in labels else 0)
+    scores = _cosine_scores(embeddings, pairs)
+    labels = pairs[:, 2].numpy()
 
-    metrics: dict = {
-        "coverage": (n_total - n_noise) / n_total if n_total > 0 else 0.0,
-        "n_clusters": n_clusters,
-        "noise_ratio": n_noise / n_total if n_total > 0 else 0.0,
-        "n_total": n_total,
-        "n_noise": n_noise,
+    if len(np.unique(labels)) < 2:
+        return {}
+
+    predictions = (scores >= threshold).astype(int)
+    return {
+        "threshold": threshold,
+        "f1": float(f1_score(labels, predictions)),
+        "precision": float(precision_score(labels, predictions, zero_division=0)),
+        "recall": float(recall_score(labels, predictions, zero_division=0)),
+        "n_pairs": int(len(labels)),
+        "n_pos": int(labels.sum()),
+        "n_predicted_pos": int(predictions.sum()),
     }
 
-    if ground_truth is not None:
-        # Оцениваем только по не-шумовым точкам
-        non_noise = labels != -1
-        if non_noise.sum() > 0:
-            metrics["ari"] = float(adjusted_rand_score(ground_truth[non_noise], labels[non_noise]))
-            metrics["nmi"] = float(normalized_mutual_info_score(ground_truth[non_noise], labels[non_noise]))
 
-    return metrics
+def evaluate_pairs_auc(
+    embeddings: torch.Tensor,
+    pairs: torch.Tensor,
+) -> dict:
+    """Threshold-free metrics: ROC-AUC and Average Precision."""
+    scores = _cosine_scores(embeddings, pairs)
+    labels = pairs[:, 2].numpy()
+
+    if len(np.unique(labels)) < 2:
+        return {}
+
+    return {
+        "roc_auc": float(roc_auc_score(labels, scores)),
+        "avg_precision": float(average_precision_score(labels, scores)),
+    }

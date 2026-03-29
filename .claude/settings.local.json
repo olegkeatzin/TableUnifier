@@ -9,7 +9,11 @@
       "Bash(uv sync:*)",
       "Bash(uv run:*)",
       "Bash(uv add:*)",
-      "Bash(uv pip:*)"
+      "Bash(uv pip:*)",
+      "Bash(python -c \":*)",
+      "Bash(python -c \"from torch_geometric.nn import GraphNorm; print\\(''GraphNorm available''\\)\")",
+      "Bash(python:*)",
+      "Bash(ls experiments/v3_*)"
     ]
   }
 }

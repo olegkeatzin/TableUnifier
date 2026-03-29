@@ -40,12 +40,14 @@ class EntityResolutionConfig:
     dropout: float = 0.1
     margin: float = 0.3
     lr: float = 1e-3
-    weight_decay: float = 0.0
+    weight_decay: float = 5e-4
     epochs: int = 50
     batch_size: int = 32
     bidirectional: bool = False
     num_heads: int = 4
     attention_dropout: float = 0.1
+    temperature: float = 0.1
+    warmup_ratio: float = 0.1
 
 
 @dataclass

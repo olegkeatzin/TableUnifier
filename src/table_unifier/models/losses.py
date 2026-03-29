@@ -1,13 +1,18 @@
 """Функции потерь и стратегии майнинга триплетов.
 
-Triplet Loss (из Обучение Triplet Loss.md):
+Triplet Loss:
   L = max(d(a, p) − d(a, n) + margin, 0)
+
+NT-Xent (InfoNCE):
+  Для каждого якоря все остальные строки — негативы, позитив — парная строка.
+  O(N) негативов на якорь при N строках в графе.
 """
 
 from __future__ import annotations
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 class TripletLoss(nn.Module):
@@ -24,6 +29,46 @@ class TripletLoss(nn.Module):
         negative: torch.Tensor,
     ) -> torch.Tensor:
         return self.loss_fn(anchor, positive, negative)
+
+
+def nt_xent_loss(
+    embeddings: torch.Tensor,
+    pos_pairs: torch.Tensor,
+    temperature: float = 0.1,
+) -> torch.Tensor:
+    """NT-Xent (InfoNCE) — memory-efficient версия.
+
+    Вместо полной [N, N] матрицы сходств вычисляет только строки
+    для anchor и positive индексов: [P, N] вместо [N, N].
+    При N=70K и P=50 это 14MB вместо 20GB.
+
+    Args:
+        embeddings: [N, D], L2-нормализованы.
+        pos_pairs:  [P, 2], индексы совпадающих строк.
+        temperature: масштабирование сходства (0.05–0.3).
+
+    Returns:
+        Скаляр — loss.
+    """
+    anchors = pos_pairs[:, 0]
+    positives = pos_pairs[:, 1]
+
+    P = len(anchors)
+
+    # [P, N] — сходства только для anchor-строк (не полная [N, N])
+    anchor_emb = embeddings[anchors]                     # [P, D]
+    logits = (anchor_emb @ embeddings.T) / temperature   # [P, N]
+    # Убираем self-similarity: logits[i, anchors[i]] = -inf
+    logits[torch.arange(P, device=logits.device), anchors] = float("-inf")
+    loss = F.cross_entropy(logits, positives)
+
+    # Симметрично: positive как anchor
+    pos_emb = embeddings[positives]                        # [P, D]
+    logits_rev = (pos_emb @ embeddings.T) / temperature    # [P, N]
+    logits_rev[torch.arange(P, device=logits_rev.device), positives] = float("-inf")
+    loss = (loss + F.cross_entropy(logits_rev, anchors)) / 2
+
+    return loss
 
 
 # ------------------------------------------------------------------ #

@@ -195,3 +195,49 @@ class EntityResolutionGAT(nn.Module):
         output = self.output_head(row_x)
         output = F.normalize(output, p=2, dim=-1)
         return output
+
+
+# ------------------------------------------------------------------ #
+#  Classification head для BCE-обучения
+# ------------------------------------------------------------------ #
+
+
+class PairClassifier(nn.Module):
+    """Классификатор пар строк поверх GNN/GAT backbone.
+
+    Берёт |emb_a - emb_b| и пропускает через MLP.
+    Возвращает raw logits — использовать с BCEWithLogitsLoss
+    (безопасен для mixed precision / AMP).
+    """
+
+    def __init__(self, backbone: nn.Module, embedding_dim: int = 128):
+        super().__init__()
+        self.backbone = backbone
+        self.classifier = nn.Sequential(
+            nn.Linear(embedding_dim, embedding_dim),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(embedding_dim, 1),
+        )
+
+    def get_embeddings(self, data: HeteroData) -> torch.Tensor:
+        """L2-нормализованные эмбеддинги строк (для eval/кластеризации)."""
+        return self.backbone(data)
+
+    def forward(
+        self, data: HeteroData, pairs: torch.Tensor,
+    ) -> torch.Tensor:
+        """Raw logits для пар строк.
+
+        Args:
+            data:  HeteroData граф.
+            pairs: [P, 2] — индексы строк (idx_a, idx_b).
+
+        Returns:
+            [P] — logits (до sigmoid). Для P(match): torch.sigmoid(logits).
+        """
+        embeddings = self.backbone(data)
+        emb_a = embeddings[pairs[:, 0]]
+        emb_b = embeddings[pairs[:, 1]]
+        diff = torch.abs(emb_a - emb_b)
+        return self.classifier(diff).squeeze(-1)

@@ -11,11 +11,15 @@ GATv2Conv: a^T · LeakyReLU(W · [h_i || h_j || e_ij])
 
 import torch
 import torch.nn as nn
-from torch_geometric.nn import GATv2Conv
+from torch_geometric.nn import GATv2Conv, GraphNorm
 
 
 class GATLayer(nn.Module):
-    """Слой GAT: Token → Row (+ опционально Row → Token) с edge features."""
+    """Слой GAT: Token → Row (+ опционально Row → Token) с edge features.
+
+    Использует GraphNorm (ICML 2021) вместо LayerNorm — лучше сходится для GNN,
+    learnable shift сохраняет структурную информацию узлов.
+    """
 
     def __init__(
         self,
@@ -44,7 +48,7 @@ class GATLayer(nn.Module):
             concat=True,  # output = num_heads * head_dim = hidden_dim
             add_self_loops=False,  # bipartite: разные типы узлов
         )
-        self.norm_row = nn.LayerNorm(hidden_dim)
+        self.norm_row = GraphNorm(hidden_dim)
         self.dropout = nn.Dropout(dropout)
 
         # Row → Token (опционально)
@@ -58,7 +62,7 @@ class GATLayer(nn.Module):
                 concat=True,
                 add_self_loops=False,  # bipartite: разные типы узлов
             )
-            self.norm_token = nn.LayerNorm(hidden_dim)
+            self.norm_token = GraphNorm(hidden_dim)
 
     def forward(
         self,
