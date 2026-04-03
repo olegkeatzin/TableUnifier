@@ -11,6 +11,7 @@ Pipeline:
 
 from __future__ import annotations
 
+import argparse
 import json
 import logging
 import time
@@ -51,7 +52,7 @@ TOP_K_FAISS = 10  # кандидатов из FAISS на строку специ
 TOP_K_DEDUP = 3  # оставляем top-N после дедупликации
 LLM_BATCH_SIZE = 5  # пар в одном промпте для LLM
 SIMILARITY_THRESHOLD = 0.7  # минимальный cosine similarity для кандидата
-SAVE_EVERY = 50  # сохранять каждые N батчей
+SAVE_EVERY = 10  # сохранять каждые N батчей
 
 
 # ------------------------------------------------------------------ #
@@ -234,7 +235,7 @@ def format_pairs_for_prompt(candidates_batch: pd.DataFrame) -> str:
     return "\n".join(lines)
 
 
-def parse_llm_response(response: str, batch_size: int) -> list[dict]:
+def parse_llm_response(response: str) -> list[dict]:
     """Извлечь JSON из ответа LLM."""
     text = response.strip()
     start = text.find("[")
@@ -253,35 +254,50 @@ def label_candidates(
     candidates: pd.DataFrame,
     client: OllamaClient,
     batch_size: int = LLM_BATCH_SIZE,
-    resume_from: int = 0,
 ) -> pd.DataFrame:
-    """Разметить дедуплицированных кандидатов через LLM."""
-    if "label" not in candidates.columns:
-        candidates["label"] = -1  # не размечено
-        candidates["confidence"] = ""
+    """Разметить дедуплицированных кандидатов через LLM.
 
-    total_batches = (len(candidates) - resume_from + batch_size - 1) // batch_size
+    Resume-логика: каждой строке присваивается batch_id.
+    При повторном запуске пропускаются батчи, где ВСЕ строки уже размечены.
+    Сохранение на диск каждые SAVE_EVERY батчей.
+    """
+    # Инициализация колонок
+    if "label" not in candidates.columns:
+        candidates["label"] = -1
+    if "confidence" not in candidates.columns:
+        candidates["confidence"] = ""
+    if "batch_id" not in candidates.columns:
+        candidates["batch_id"] = candidates.index // batch_size
+
+    # Определяем какие батчи ещё не размечены (хотя бы одна строка с label == -1)
+    all_batch_ids = sorted(candidates["batch_id"].unique())
+    done_batches = set()
+    for bid in all_batch_ids:
+        mask = candidates["batch_id"] == bid
+        if (candidates.loc[mask, "label"] != -1).all():
+            done_batches.add(bid)
+
+    todo_batches = [b for b in all_batch_ids if b not in done_batches]
     logger.info(
-        "LLM-разметка: %d кандидатов, батч=%d, ~%d батчей (с позиции %d)",
-        len(candidates), batch_size, total_batches, resume_from,
+        "LLM-разметка: %d батчей всего, %d уже готово, %d осталось",
+        len(all_batch_ids), len(done_batches), len(todo_batches),
     )
+
+    if not todo_batches:
+        logger.info("Все батчи уже размечены, пропускаем.")
+        return candidates
 
     labeled_count = 0
     errors = 0
 
-    for batch_start in tqdm(
-        range(resume_from, len(candidates), batch_size),
-        desc="LLM labeling",
-        total=total_batches,
-    ):
-        batch_end = min(batch_start + batch_size, len(candidates))
-        batch = candidates.iloc[batch_start:batch_end]
+    for i, bid in enumerate(tqdm(todo_batches, desc="LLM labeling")):
+        batch = candidates[candidates["batch_id"] == bid]
 
         prompt = LABEL_PROMPT.format(pairs=format_pairs_for_prompt(batch))
 
         try:
             response = client.generate(prompt)
-            results = parse_llm_response(response, len(batch))
+            results = parse_llm_response(response)
 
             for result in results:
                 pair_id = result.get("pair_id", -1)
@@ -292,17 +308,21 @@ def label_candidates(
                     labeled_count += 1
 
         except Exception as e:
-            logger.error("Ошибка LLM на батче %d: %s", batch_start, e)
+            logger.error("Ошибка LLM на батче %d: %s", bid, e)
             errors += 1
 
         # Периодическое сохранение
-        batch_num = (batch_start - resume_from) // batch_size
-        if batch_num > 0 and batch_num % SAVE_EVERY == 0:
+        if (i + 1) % SAVE_EVERY == 0:
             candidates.to_parquet(LABELED_PATH)
-            logger.info("  Промежуточное сохранение (%d): %d размечено, %d ошибок",
-                        batch_num, labeled_count, errors)
+            total_done = (candidates["label"] != -1).sum()
+            logger.info(
+                "  Checkpoint: батч %d/%d, размечено %d/%d, ошибок %d",
+                i + 1, len(todo_batches), total_done, len(candidates), errors,
+            )
 
-    logger.info("Разметка завершена: %d размечено, %d ошибок", labeled_count, errors)
+    # Финальное сохранение
+    candidates.to_parquet(LABELED_PATH)
+    logger.info("Разметка завершена: %d новых меток, %d ошибок", labeled_count, errors)
     return candidates
 
 
@@ -328,6 +348,13 @@ def propagate_labels(
 # ------------------------------------------------------------------ #
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="FAISS blocking + LLM labeling")
+    parser.add_argument(
+        "--model", type=str, default=None,
+        help="Ollama LLM model (default: из OllamaConfig, qwen3.5:9b)",
+    )
+    args = parser.parse_args()
+
     t0 = time.time()
 
     # 1. Загрузка
@@ -352,17 +379,18 @@ def main() -> None:
         logger.info("    [%.2f, %.2f): %d (%.1f%%)", lo, hi, n, 100 * n / len(dedup))
 
     # 4. LLM-разметка (только дедуплицированных пар)
-    resume_from = 0
     if LABELED_PATH.exists():
-        logger.info("Найден частично размеченный файл, продолжаем...")
+        logger.info("Найден частично размеченный файл, загружаем для продолжения...")
         dedup = pd.read_parquet(LABELED_PATH)
-        labeled_mask = dedup["label"] != -1
-        resume_from = labeled_mask.sum()
-        resume_from = (resume_from // LLM_BATCH_SIZE) * LLM_BATCH_SIZE
-        logger.info("  Продолжаем с позиции %d / %d", resume_from, len(dedup))
+        done = (dedup["label"] != -1).sum()
+        logger.info("  Уже размечено: %d / %d (%.1f%%)", done, len(dedup), 100 * done / len(dedup))
 
-    client = OllamaClient(OllamaConfig())
-    dedup = label_candidates(dedup, client, resume_from=resume_from)
+    config = OllamaConfig()
+    if args.model:
+        config.llm_model = args.model
+        logger.info("Используем модель: %s", args.model)
+    client = OllamaClient(config)
+    dedup = label_candidates(dedup, client)
 
     # 5. Сохранение
     dedup.to_parquet(LABELED_PATH)
