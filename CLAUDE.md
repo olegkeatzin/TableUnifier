@@ -34,6 +34,10 @@ uv run python experiments/03_train_er_without_sm.py
 uv run python experiments/05_hpo.py
 uv run python experiments/06_train_final.py
 uv run python experiments/07_real_data_test.py
+uv run python experiments/08_build_unified_graph.py
+uv run python experiments/09_train_gat.py
+uv run python experiments/10_evaluate.py
+uv run python experiments/11_train_gat_bce.py
 ```
 
 ### External Services Required
@@ -59,6 +63,8 @@ CSV Tables
 **EntityResolutionGNN** (`models/entity_resolution.py`): Гетерогенный GNN с `L` слоями `EdgeMeanConv`. Узлы: `row` (312-dim CLS) и `token` (312-dim vocab). Рёбра `token→row` несут column embeddings (4096-dim) как атрибуты. Финальные row embeddings используются для поиска дубликатов через косинусное сходство.
 
 **EdgeMeanConv** (`models/gnn_layer.py`): Message passing с mean агрегацией, использует edge features (token→row и опционально обратное направление).
+
+**GATLayer** (`models/gat_layer.py`): GATv2Conv с edge features и multi-head attention. Использует GraphNorm вместо LayerNorm. Поддерживает bidirectional (token→row + row→token).
 
 ### Key Design Decisions
 
@@ -96,6 +102,9 @@ CSV Tables
 | `models/schema_matching.py` | Model | SchemaProjector |
 | `models/entity_resolution.py` | Model | EntityResolutionGNN |
 | `models/gnn_layer.py` | Model | EdgeMeanConv layer |
+| `models/gat_layer.py` | Model | GATv2 layer с edge features |
 | `models/losses.py` | Model | TripletLoss + полу-жёсткий майнинг |
+| `evaluation/clustering.py` | Eval | Threshold sweep (F1), ROC-AUC, HDBSCAN clustering |
+| `dataset/data_split.py` | Data | Стратифицированный split по связным компонентам |
 | `training/schema_trainer.py` | Train | Обучение SchemaProjector |
 | `training/er_trainer.py` | Train | Обучение ER модели (single/multi) |
