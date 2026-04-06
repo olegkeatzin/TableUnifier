@@ -140,41 +140,24 @@ class TraceCallback(BaseCallbackHandler):
 # ------------------------------------------------------------------ #
 
 REACT_PROMPT = PromptTemplate.from_template("""\
-Ты эксперт по сопоставлению промышленной номенклатуры электронных компонентов.
+Ты эксперт по сопоставлению номенклатуры электронных компонентов.
+Определи, описывают ли две записи ОДИН И ТОТ ЖЕ товар.
 
-Тебе дана пара записей: одна из спецификации, другая из номенклатуры.
-Определи, описывают ли они ОДИН И ТОТ ЖЕ конкретный товар/компонент.
+Правила: совпадение децимальных номеров/артикулов = match. Разные модификации (-01/-02), допуски (±5%/±10%), номиналы = НЕ match. Сокращения и порядок слов могут отличаться.
 
-Правила:
-- Децимальные номера (ВАКШ.xxx, НЯИТ.xxx) — если совпадают, это почти наверняка match
-- Коды продукции и артикулы тоже сильный сигнал
-- Наименования могут различаться сокращениями и порядком слов
-- Разные модификации одного изделия (-01, -02, -04) — это РАЗНЫЕ товары (не match)
-- Разные допуски (±5% vs ±10%) — это РАЗНЫЕ товары (не match)
-- Разные номиналы (100 пФ vs 1000 пФ) — это РАЗНЫЕ товары (не match)
+Инструменты: {tools}
+Названия: {tool_names}
 
-У тебя есть доступ к инструментам:
-
-{tools}
-
-Чтобы использовать инструмент, напиши ТОЧНО в таком формате:
-
-Thought: <твои рассуждения о паре>
+Формат:
+Thought: краткие рассуждения (2-3 предложения)
 Action: <имя инструмента>
-Action Input: <входные данные для инструмента>
+Action Input: <запрос>
 
-После получения результата инструмента:
+Или финальный ответ:
+Thought: краткий вывод
+Final Answer: {{"match": true/false, "confidence": "high"/"medium"/"low", "reasoning": "одно предложение"}}
 
-Thought: <рассуждения с учётом результатов поиска>
-
-Когда готов дать ответ:
-
-Thought: <финальные рассуждения>
-Final Answer: {{"match": true/false, "confidence": "high"/"medium"/"low", "reasoning": "краткое обоснование"}}
-
-Названия инструментов: {tool_names}
-
-Начинай!
+ВАЖНО: рассуждения должны быть КРАТКИМИ. Не пиши длинный анализ.
 
 Вопрос: {input}
 {agent_scratchpad}""")
@@ -189,7 +172,7 @@ def create_agent(model: str, host: str) -> AgentExecutor:
     llm = ChatOllama(
         model=model,
         base_url=host,
-        num_predict=2048,
+        num_predict=4096,
         temperature=0,
     )
     search = DuckDuckGoSearchRun()
@@ -240,7 +223,14 @@ def label_one_pair(
     elapsed_ms = (time.monotonic() - t_start) * 1000
 
     raw_output = response.get("output", "")
+    # Если в output нет JSON, ищем в полном логе агента (рассуждения + Final Answer)
+    full_log = "\n".join(
+        s.get("log", "") or s.get("content", "") or s.get("output", "")
+        for s in cb.steps
+    )
     result = _parse_final(raw_output, cb.searches)
+    if result["reasoning"].startswith("PARSE_ERROR"):
+        result = _parse_final(full_log + "\n" + raw_output, cb.searches)
 
     # Trace
     trace = {
