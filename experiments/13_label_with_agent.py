@@ -1,9 +1,9 @@
-"""Разметка реальных данных: LLM-агент с веб-поиском.
+"""Разметка реальных данных: LangChain ReAct-агент с веб-поиском.
 
 Сравнение с 12_label_real_data.py:
-  - Использует gemma4:26b вместо qwen3.5:9b
+  - Использует gemma4:26b через LangChain ReAct-агент (prompt-based tool calling)
   - Агент может вызывать веб-поиск для уточнения информации о компонентах
-  - Обрабатывает пары по одной (не батчами) для корректной работы tool calling
+  - Не зависит от нативного tool calling модели — работает через Thought/Action/Observation
   - Результат сохраняется отдельно для сравнения качества
 
 Требования:
@@ -21,12 +21,16 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import re
 import time
 from pathlib import Path
 
-import ollama
 import pandas as pd
-from duckduckgo_search import DDGS
+from langchain_classic.agents import AgentExecutor, create_react_agent
+from langchain_community.tools import DuckDuckGoSearchRun
+from langchain_core.callbacks import BaseCallbackHandler
+from langchain_core.prompts import PromptTemplate
+from langchain_ollama import ChatOllama
 from tqdm import tqdm
 
 # ------------------------------------------------------------------ #
@@ -37,6 +41,8 @@ LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
+# Не наследовать от root logger
+logger.propagate = False
 
 # Консоль — только INFO+
 _console = logging.StreamHandler()
@@ -62,9 +68,8 @@ TRACE_PATH = DATA_DIR / "agent_traces.jsonl"
 #  Параметры
 # ------------------------------------------------------------------ #
 DEFAULT_MODEL = "gemma4:26b"
-MAX_TOOL_ROUNDS = 3          # макс. итераций tool calling на одну пару
+MAX_AGENT_ITERATIONS = 5     # макс. шагов агента (Thought→Action→Observation)
 SAVE_EVERY = 50              # сохранять каждые N пар
-SEARCH_MAX_RESULTS = 3       # результатов веб-поиска на запрос
 OLLAMA_HOST = "http://localhost:11434"
 
 
@@ -88,43 +93,57 @@ def _write_trace(record: dict) -> None:
 
 
 # ------------------------------------------------------------------ #
-#  Web search tool
+#  LangChain callback для логирования trace
 # ------------------------------------------------------------------ #
 
-def web_search(query: str) -> str:
-    """Search the web for information about electronic components, product codes, or technical specifications.
+class TraceCallback(BaseCallbackHandler):
+    """Собирает шаги агента (мысли, tool calls, результаты) для логирования."""
 
-    Args:
-        query: Search query in Russian or English. Use product codes, part numbers,
-               or component names to find datasheets and specifications.
-    """
-    try:
-        with DDGS() as ddgs:
-            results = list(ddgs.text(query, max_results=SEARCH_MAX_RESULTS))
-        if not results:
-            return "Ничего не найдено."
-        parts = []
-        for r in results:
-            parts.append(f"**{r['title']}**\n{r['body']}\nURL: {r['href']}")
-        return "\n\n".join(parts)
-    except Exception as e:
-        return f"Ошибка поиска: {e}"
+    def __init__(self):
+        self.steps: list[dict] = []
+        self.searches = 0
+
+    def on_agent_action(self, action, **kwargs):
+        """Агент решил вызвать инструмент."""
+        logger.debug("  ACTION: %s(%r)", action.tool, action.tool_input)
+        self.steps.append({
+            "type": "action",
+            "tool": action.tool,
+            "input": action.tool_input,
+            "thought": action.log.strip(),
+        })
+        if action.tool == "web_search":
+            self.searches += 1
+
+    def on_tool_end(self, output, **kwargs):
+        """Инструмент вернул результат."""
+        output_str = str(output)
+        logger.debug("  OBSERVATION (%d chars): %s", len(output_str), output_str[:500])
+        self.steps.append({
+            "type": "observation",
+            "output_length": len(output_str),
+            "output_preview": output_str[:1000],
+        })
+
+    def on_agent_finish(self, finish, **kwargs):
+        """Агент дал финальный ответ."""
+        logger.debug("  FINAL: %s", finish.log.strip())
+        self.steps.append({
+            "type": "final",
+            "output": finish.return_values.get("output", ""),
+            "log": finish.log.strip(),
+        })
 
 
 # ------------------------------------------------------------------ #
-#  Промпт
+#  ReAct промпт
 # ------------------------------------------------------------------ #
 
-SYSTEM_PROMPT = """\
+REACT_PROMPT = PromptTemplate.from_template("""\
 Ты эксперт по сопоставлению промышленной номенклатуры электронных компонентов.
 
 Тебе дана пара записей: одна из спецификации, другая из номенклатуры.
 Определи, описывают ли они ОДИН И ТОТ ЖЕ конкретный товар/компонент.
-
-У тебя есть инструмент web_search — используй его, если:
-- Не уверен, что за компонент описан (незнакомый код, децимальный номер, артикул)
-- Нужно уточнить, являются ли два обозначения синонимами одного изделия
-- Нужно проверить, отличаются ли модификации (-01, -02) по параметрам
 
 Правила:
 - Децимальные номера (ВАКШ.xxx, НЯИТ.xxx) — если совпадают, это почти наверняка match
@@ -134,179 +153,197 @@ SYSTEM_PROMPT = """\
 - Разные допуски (±5% vs ±10%) — это РАЗНЫЕ товары (не match)
 - Разные номиналы (100 пФ vs 1000 пФ) — это РАЗНЫЕ товары (не match)
 
-В конце ОБЯЗАТЕЛЬНО ответь JSON (без markdown-блока):
-{"match": true/false, "confidence": "high"/"medium"/"low", "reasoning": "краткое обоснование"}"""
+У тебя есть доступ к инструментам:
 
+{tools}
 
-def build_user_message(spec_text: str, nom_text: str, cosine_sim: float) -> str:
-    return (
-        f"Спецификация: \"{spec_text}\"\n"
-        f"Номенклатура: \"{nom_text}\"\n"
-        f"Cosine similarity: {cosine_sim:.3f}"
-    )
+Чтобы использовать инструмент, напиши ТОЧНО в таком формате:
+
+Thought: <твои рассуждения о паре>
+Action: <имя инструмента>
+Action Input: <входные данные для инструмента>
+
+После получения результата инструмента:
+
+Thought: <рассуждения с учётом результатов поиска>
+
+Когда готов дать ответ:
+
+Thought: <финальные рассуждения>
+Final Answer: {{"match": true/false, "confidence": "high"/"medium"/"low", "reasoning": "краткое обоснование"}}
+
+Названия инструментов: {tool_names}
+
+Начинай!
+
+Вопрос: {input}
+{agent_scratchpad}""")
 
 
 # ------------------------------------------------------------------ #
 #  Агентный цикл
 # ------------------------------------------------------------------ #
 
+def create_agent(model: str, host: str) -> AgentExecutor:
+    """Создать LangChain ReAct-агента."""
+    llm = ChatOllama(
+        model=model,
+        base_url=host,
+        num_predict=2048,
+        temperature=0,
+    )
+    search = DuckDuckGoSearchRun()
+    search.name = "web_search"
+    search.description = (
+        "Поиск в интернете. Используй для поиска информации об электронных "
+        "компонентах, кодах продукции, децимальных номерах и технических "
+        "характеристиках. Input: поисковый запрос на русском или английском."
+    )
+    tools = [search]
+    agent = create_react_agent(llm, tools, REACT_PROMPT)
+    return AgentExecutor(
+        agent=agent,
+        tools=tools,
+        max_iterations=MAX_AGENT_ITERATIONS,
+        handle_parsing_errors=True,
+        verbose=False,  # логируем через callback
+    )
+
+
 def label_one_pair(
-    client: ollama.Client,
-    model: str,
+    executor: AgentExecutor,
     pair_idx: int,
     spec_text: str,
     nom_text: str,
     cosine_sim: float,
 ) -> dict:
-    """Разметить одну пару через агента с tool calling.
+    """Разметить одну пару через ReAct-агента.
 
     Returns:
         {"match": bool, "confidence": str, "reasoning": str,
          "searches": int, "raw_response": str}
     """
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": build_user_message(spec_text, nom_text, cosine_sim)},
-    ]
-
-    # Trace для JSONL — собираем все шаги
-    trace = {
-        "pair_idx": pair_idx,
-        "spec_text": spec_text,
-        "nom_text": nom_text,
-        "cosine_sim": cosine_sim,
-        "steps": [],
-        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-    }
+    question = (
+        f'Спецификация: "{spec_text}"\n'
+        f'Номенклатура: "{nom_text}"\n'
+        f"Cosine similarity: {cosine_sim:.3f}\n\n"
+        f"Это один и тот же товар? Используй web_search если не уверен."
+    )
 
     logger.debug("=" * 80)
     logger.debug("PAIR #%d  sim=%.3f", pair_idx, cosine_sim)
     logger.debug("  SPEC: %s", spec_text)
     logger.debug("  NOM:  %s", nom_text)
 
-    searches = 0
+    cb = TraceCallback()
+    t_start = time.monotonic()
+    response = executor.invoke({"input": question}, config={"callbacks": [cb]})
+    elapsed_ms = (time.monotonic() - t_start) * 1000
 
-    for round_i in range(MAX_TOOL_ROUNDS):
-        response = client.chat(
-            model=model,
-            messages=messages,
-            tools=[web_search],
-        )
+    raw_output = response.get("output", "")
+    result = _parse_final(raw_output, cb.searches)
 
-        msg = response.message
-
-        # Логируем текст ответа модели (рассуждения)
-        if msg.content:
-            logger.debug("  [round %d] MODEL: %s", round_i, msg.content)
-            trace["steps"].append({
-                "type": "model_response",
-                "round": round_i,
-                "content": msg.content,
-            })
-
-        # Если нет tool calls — финальный ответ
-        if not msg.tool_calls:
-            logger.debug("  [round %d] FINAL (no tool calls)", round_i)
-            result = _parse_final(msg.content, searches)
-            trace["result"] = result
-            trace["total_rounds"] = round_i + 1
-            _write_trace(trace)
-            _log_result(pair_idx, result)
-            return result
-
-        # Выполняем tool calls
-        messages.append(msg)
-        for tool_call in msg.tool_calls:
-            fn_name = tool_call.function.name
-            fn_args = tool_call.function.arguments
-
-            if fn_name == "web_search":
-                query = fn_args.get("query", "")
-                logger.debug("  [round %d] TOOL CALL: web_search(%r)", round_i, query)
-
-                t_start = time.monotonic()
-                search_result = web_search(query)
-                elapsed_ms = (time.monotonic() - t_start) * 1000
-
-                searches += 1
-                # Логируем результат поиска (первые 500 символов в файловый лог)
-                logger.debug(
-                    "  [round %d] TOOL RESULT (%d chars, %.0fms): %s",
-                    round_i, len(search_result), elapsed_ms,
-                    search_result[:500],
-                )
-
-                trace["steps"].append({
-                    "type": "tool_call",
-                    "round": round_i,
-                    "function": fn_name,
-                    "query": query,
-                    "result_length": len(search_result),
-                    "result_preview": search_result[:1000],
-                    "elapsed_ms": round(elapsed_ms),
-                })
-
-                messages.append({"role": "tool", "content": search_result})
-            else:
-                logger.warning("  [round %d] UNKNOWN TOOL: %s(%s)", round_i, fn_name, fn_args)
-                trace["steps"].append({
-                    "type": "unknown_tool",
-                    "round": round_i,
-                    "function": fn_name,
-                    "arguments": fn_args,
-                })
-
-    # Исчерпали раунды — делаем финальный запрос без tools
-    logger.debug("  MAX ROUNDS reached, forcing final answer")
-    messages.append({
-        "role": "user",
-        "content": "Дай финальный ответ в JSON: {\"match\": true/false, \"confidence\": \"high\"/\"medium\"/\"low\", \"reasoning\": \"...\"}",
-    })
-    response = client.chat(model=model, messages=messages)
-
-    if response.message.content:
-        logger.debug("  FORCED FINAL: %s", response.message.content)
-        trace["steps"].append({
-            "type": "forced_final",
-            "content": response.message.content,
-        })
-
-    result = _parse_final(response.message.content, searches)
-    trace["result"] = result
-    trace["total_rounds"] = MAX_TOOL_ROUNDS + 1
+    # Trace
+    trace = {
+        "pair_idx": pair_idx,
+        "spec_text": spec_text,
+        "nom_text": nom_text,
+        "cosine_sim": cosine_sim,
+        "steps": cb.steps,
+        "result": result,
+        "elapsed_ms": round(elapsed_ms),
+        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
     _write_trace(trace)
-    _log_result(pair_idx, result)
+    _log_result(pair_idx, result, elapsed_ms)
     return result
 
 
-def _log_result(pair_idx: int, result: dict) -> None:
+def _log_result(pair_idx: int, result: dict, elapsed_ms: float) -> None:
     """Лог-строка итога для пары."""
     match_str = "MATCH" if result["match"] else "NO MATCH"
     logger.debug(
-        "  RESULT: %s (conf=%s, searches=%d) — %s",
-        match_str, result["confidence"], result["searches"],
+        "  RESULT: %s (conf=%s, searches=%d, %.0fms) — %s",
+        match_str, result["confidence"], result["searches"], elapsed_ms,
         result["reasoning"][:120] if result["reasoning"] else "",
     )
 
 
+# ------------------------------------------------------------------ #
+#  Парсинг JSON из ответа агента
+# ------------------------------------------------------------------ #
+
 def _parse_final(text: str, searches: int) -> dict:
-    """Извлечь JSON из финального ответа."""
+    """Извлечь JSON из финального ответа.
+
+    Устойчив к обрезанным ответам: пытается достроить незакрытый JSON.
+    """
     raw = text.strip()
-    # Ищем JSON в ответе
     start = raw.find("{")
-    end = raw.rfind("}")
-    if start != -1 and end != -1:
+    if start == -1:
+        logger.warning("Нет JSON в ответе: %s", raw[:200])
+        return _fallback_parse(raw, searches)
+
+    fragment = raw[start:]
+
+    # 1. Попытка парсинга как есть (полный JSON)
+    end = fragment.rfind("}")
+    if end != -1:
         try:
-            data = json.loads(raw[start : end + 1])
-            return {
-                "match": bool(data.get("match", False)),
-                "confidence": data.get("confidence", "medium"),
-                "reasoning": data.get("reasoning", ""),
-                "searches": searches,
-                "raw_response": raw,
-            }
+            data = json.loads(fragment[: end + 1])
+            return _build_result(data, raw, searches)
         except json.JSONDecodeError:
             pass
+
+    # 2. JSON обрезан — пробуем достроить
+    repaired = fragment.rstrip()
+    if repaired.count('"') % 2 == 1:
+        repaired += '"'
+    if not repaired.endswith("}"):
+        repaired += "}"
+
+    try:
+        data = json.loads(repaired)
+        logger.debug("  JSON repaired successfully")
+        return _build_result(data, raw, searches)
+    except json.JSONDecodeError:
+        pass
+
+    # 3. Regex-фолбэк
+    return _fallback_parse(raw, searches)
+
+
+def _build_result(data: dict, raw: str, searches: int) -> dict:
+    return {
+        "match": bool(data.get("match", False)),
+        "confidence": data.get("confidence", "medium"),
+        "reasoning": data.get("reasoning", ""),
+        "searches": searches,
+        "raw_response": raw,
+    }
+
+
+def _fallback_parse(raw: str, searches: int) -> dict:
+    """Regex-фолбэк для извлечения match/confidence из сломанного JSON."""
+    match_val = None
+    m = re.search(r'"match"\s*:\s*(true|false)', raw, re.IGNORECASE)
+    if m:
+        match_val = m.group(1).lower() == "true"
+
+    conf = "medium"
+    m = re.search(r'"confidence"\s*:\s*"(high|medium|low)"', raw, re.IGNORECASE)
+    if m:
+        conf = m.group(1).lower()
+
+    if match_val is not None:
+        logger.debug("  Fallback parse OK: match=%s, confidence=%s", match_val, conf)
+        return {
+            "match": match_val,
+            "confidence": conf,
+            "reasoning": f"PARTIAL_PARSE: {raw[:200]}",
+            "searches": searches,
+            "raw_response": raw,
+        }
 
     logger.warning("Не удалось распарсить ответ: %s", raw[:200])
     return {
@@ -324,15 +361,13 @@ def _parse_final(text: str, searches: int) -> dict:
 
 def label_candidates(
     candidates: pd.DataFrame,
-    client: ollama.Client,
-    model: str,
+    executor: AgentExecutor,
     output_path: Path = OUTPUT_PATH,
 ) -> pd.DataFrame:
-    """Разметить кандидатов через агента.
+    """Разметить кандидатов через ReAct-агента.
 
     Resume-логика: пропускает строки, где label уже != -1.
     """
-    # Инициализация колонок
     for col, default in [
         ("label", -1), ("confidence", ""), ("reasoning", ""),
         ("searches", 0), ("raw_response", ""),
@@ -360,7 +395,7 @@ def label_candidates(
 
         try:
             result = label_one_pair(
-                client, model, idx,
+                executor, idx,
                 row["spec_text"], row["nom_text"], row["cosine_sim"],
             )
             candidates.at[idx, "label"] = 1 if result["match"] else 0
@@ -385,7 +420,7 @@ def label_candidates(
                 total_searches, errors,
             )
 
-    candidates.to_parquet(OUTPUT_PATH)
+    candidates.to_parquet(output_path)
     logger.info(
         "Разметка завершена: %d новых меток, %d поисков, %d ошибок",
         labeled_count, total_searches, errors,
@@ -399,7 +434,7 @@ def label_candidates(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="LLM-агент с веб-поиском для разметки пар",
+        description="LangChain ReAct-агент с веб-поиском для разметки пар",
     )
     parser.add_argument(
         "--model", type=str, default=DEFAULT_MODEL,
@@ -443,12 +478,12 @@ def main() -> None:
         candidates = pd.read_parquet(input_path)
         logger.info("Загружено %d кандидатных пар из %s", len(candidates), input_path)
 
-    # Клиент
-    client = ollama.Client(host=args.host)
+    # Создаём агента
     logger.info("Модель: %s, host: %s", args.model, args.host)
+    executor = create_agent(args.model, args.host)
 
     # Разметка
-    candidates = label_candidates(candidates, client, args.model, output_path)
+    candidates = label_candidates(candidates, executor, output_path)
     candidates.to_parquet(output_path)
 
     # Статистика
