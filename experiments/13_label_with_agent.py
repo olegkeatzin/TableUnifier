@@ -25,6 +25,8 @@ import re
 import time
 from pathlib import Path
 
+import faiss
+import numpy as np
 import pandas as pd
 from langchain_classic.agents import AgentExecutor, create_react_agent
 from langchain_community.tools import DuckDuckGoSearchRun
@@ -32,6 +34,8 @@ from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.prompts import PromptTemplate
 from langchain_ollama import ChatOllama
 from tqdm import tqdm
+
+from table_unifier.dataset.embedding_generation import TokenEmbedder
 
 # ------------------------------------------------------------------ #
 #  Логирование: консоль (INFO) + файл (DEBUG)
@@ -59,18 +63,172 @@ logger.addHandler(_file_handler)
 # ------------------------------------------------------------------ #
 #  Пути
 # ------------------------------------------------------------------ #
+RAW_DATA_DIR = Path("experiments/07_real_data_test")
 DATA_DIR = Path("data/labeled")
-DEDUP_PATH = DATA_DIR / "candidates_dedup.parquet"
+EMBEDDINGS_CACHE = DATA_DIR / "embeddings_cache.npz"  # общий с экспериментом 12
+CANDIDATES_PATH = DATA_DIR / "candidates_agent.parquet"
+DEDUP_PATH = DATA_DIR / "candidates_agent_dedup.parquet"
 OUTPUT_PATH = DATA_DIR / "labeled_pairs_agent.parquet"
 TRACE_PATH = DATA_DIR / "agent_traces.jsonl"
 
 # ------------------------------------------------------------------ #
-#  Параметры
+#  Параметры блокинга (ослабленные vs эксперимент 12)
+# ------------------------------------------------------------------ #
+TOP_K_FAISS = 30             # было 10 — больше кандидатов
+TOP_K_DEDUP = 10             # было 3 — больше пар после дедупликации
+SIMILARITY_THRESHOLD = 0.5   # было 0.7 — мягче порог
+
+# ------------------------------------------------------------------ #
+#  Параметры агента
 # ------------------------------------------------------------------ #
 DEFAULT_MODEL = "gemma4:26b"
 MAX_AGENT_ITERATIONS = 5     # макс. шагов агента (Thought→Action→Observation)
 SAVE_EVERY = 50              # сохранять каждые N пар
 OLLAMA_HOST = "http://localhost:11434"
+
+
+# ------------------------------------------------------------------ #
+#  1. Загрузка и очистка данных
+# ------------------------------------------------------------------ #
+
+def load_and_clean() -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Загрузить и очистить оба файла."""
+    logger.info("Загрузка данных...")
+
+    nom = pd.read_excel(RAW_DATA_DIR / "Номенклатура полная.xlsx")
+    spec = pd.read_excel(RAW_DATA_DIR / "сводная_спецификация.xlsx")
+
+    nom = nom[nom["Наименование"].notna() & (nom["Наименование"].str.strip() != "")]
+    nom = nom.reset_index(drop=True)
+
+    def nom_text(row: pd.Series) -> str:
+        parts = [str(row["Наименование"]).strip()]
+        if pd.notna(row.get("Артикул ")) and str(row["Артикул "]).strip():
+            parts.append(f"Артикул: {str(row['Артикул ']).strip()}")
+        if pd.notna(row.get("Полное наименование")) and str(row["Полное наименование"]).strip():
+            full = str(row["Полное наименование"]).strip()
+            if full != parts[0]:
+                parts.append(full)
+        return " | ".join(parts)
+
+    nom["text"] = nom.apply(nom_text, axis=1)
+
+    spec = spec[spec["наименование"].notna() & (spec["наименование"].str.strip() != "")]
+    spec = spec.reset_index(drop=True)
+
+    def spec_text(row: pd.Series) -> str:
+        parts = [str(row["наименование"]).strip()]
+        if pd.notna(row.get("кодпродукции")) and str(row["кодпродукции"]).strip():
+            parts.append(f"Код: {str(row['кодпродукции']).strip()}")
+        if pd.notna(row.get("обозначениедокументанапоставку")) and str(row["обозначениедокументанапоставку"]).strip():
+            parts.append(str(row["обозначениедокументанапоставку"]).strip())
+        return " | ".join(parts)
+
+    spec["text"] = spec.apply(spec_text, axis=1)
+
+    logger.info("Номенклатура: %d строк, Спецификация: %d строк", len(nom), len(spec))
+    return nom, spec
+
+
+# ------------------------------------------------------------------ #
+#  2. Эмбеддинги (переиспользует кэш из эксперимента 12)
+# ------------------------------------------------------------------ #
+
+def get_embeddings(
+    nom: pd.DataFrame, spec: pd.DataFrame,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Генерация или загрузка кэшированных эмбеддингов."""
+    if EMBEDDINGS_CACHE.exists():
+        logger.info("Загрузка кэшированных эмбеддингов из %s", EMBEDDINGS_CACHE)
+        data = np.load(EMBEDDINGS_CACHE)
+        return data["nom_emb"], data["spec_emb"]
+
+    logger.info("Генерация эмбеддингов rubert-tiny2...")
+    embedder = TokenEmbedder()
+
+    logger.info("  Номенклатура: %d текстов...", len(nom))
+    nom_emb = embedder.embed_sentences(nom["text"].tolist(), batch_size=128)
+
+    logger.info("  Спецификация: %d текстов...", len(spec))
+    spec_emb = embedder.embed_sentences(spec["text"].tolist(), batch_size=128)
+
+    np.savez(EMBEDDINGS_CACHE, nom_emb=nom_emb, spec_emb=spec_emb)
+    logger.info("Эмбеддинги сохранены в %s", EMBEDDINGS_CACHE)
+    return nom_emb, spec_emb
+
+
+# ------------------------------------------------------------------ #
+#  3. FAISS blocking (ослабленный)
+# ------------------------------------------------------------------ #
+
+def faiss_blocking(
+    nom_emb: np.ndarray,
+    spec_emb: np.ndarray,
+    top_k: int = TOP_K_FAISS,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Для каждой строки спецификации найти top_k ближайших из номенклатуры."""
+    logger.info("FAISS blocking: top-%d из %d для %d запросов...",
+                top_k, nom_emb.shape[0], spec_emb.shape[0])
+
+    nom_normed = nom_emb / (np.linalg.norm(nom_emb, axis=1, keepdims=True) + 1e-9)
+    spec_normed = spec_emb / (np.linalg.norm(spec_emb, axis=1, keepdims=True) + 1e-9)
+
+    nom_normed = nom_normed.astype(np.float32)
+    spec_normed = spec_normed.astype(np.float32)
+
+    dim = nom_normed.shape[1]
+    index = faiss.IndexFlatIP(dim)
+    index.add(nom_normed)
+
+    distances, indices = index.search(spec_normed, top_k)
+    logger.info("Blocking завершён. Средний cosine sim top-1: %.3f", distances[:, 0].mean())
+    return distances, indices
+
+
+def build_candidates(
+    nom: pd.DataFrame,
+    spec: pd.DataFrame,
+    distances: np.ndarray,
+    indices: np.ndarray,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Собрать DataFrame кандидатных пар с дедупликацией."""
+    rows = []
+    for spec_idx in range(len(spec)):
+        for k in range(distances.shape[1]):
+            sim = distances[spec_idx, k]
+            if sim < SIMILARITY_THRESHOLD:
+                continue
+            nom_idx = indices[spec_idx, k]
+            rows.append({
+                "spec_idx": spec_idx,
+                "nom_idx": int(nom_idx),
+                "spec_text": spec.iloc[spec_idx]["text"],
+                "nom_text": nom.iloc[nom_idx]["text"],
+                "cosine_sim": float(sim),
+            })
+
+    candidates = pd.DataFrame(rows)
+    logger.info("Кандидатов (до дедупликации): %d", len(candidates))
+
+    dedup = (
+        candidates
+        .drop_duplicates(subset=["spec_text", "nom_text"])
+        .sort_values("cosine_sim", ascending=False)
+        .groupby("spec_text")
+        .head(TOP_K_DEDUP)
+        .reset_index(drop=True)
+    )
+    logger.info(
+        "После дедупликации (top-%d на уник. spec): %d пар (%d уник. spec, %d уник. nom)",
+        TOP_K_DEDUP, len(dedup), dedup["spec_text"].nunique(), dedup["nom_text"].nunique(),
+    )
+
+    # Статистика
+    for lo, hi in [(0.50, 0.70), (0.70, 0.85), (0.85, 0.90), (0.90, 0.95), (0.95, 1.001)]:
+        n = ((dedup["cosine_sim"] >= lo) & (dedup["cosine_sim"] < hi)).sum()
+        logger.info("  sim [%.2f, %.2f): %d (%.1f%%)", lo, hi, n, 100 * n / len(dedup))
+
+    return candidates, dedup
 
 
 # ------------------------------------------------------------------ #
@@ -399,7 +557,6 @@ def label_candidates(
             logger.error("Ошибка на паре %d: %s", idx, e, exc_info=True)
             errors += 1
 
-        # Периодическое сохранение (+ после первой пары для быстрого feedback)
         if (i + 1) % SAVE_EVERY == 0 or i == 0:
             candidates.to_parquet(output_path)
             done = (candidates["label"] != -1).sum()
@@ -434,44 +591,83 @@ def main() -> None:
         help=f"Ollama host (default: {OLLAMA_HOST})",
     )
     parser.add_argument(
-        "--input", type=str, default=str(DEDUP_PATH),
-        help="Путь к candidates_dedup.parquet (default: из эксперимента 12)",
+        "--skip-blocking", action="store_true",
+        help="Пропустить блокинг, загрузить существующие кандидаты",
     )
     parser.add_argument(
         "--output", type=str, default=str(OUTPUT_PATH),
         help=f"Путь для сохранения результатов (default: {OUTPUT_PATH})",
     )
+    parser.add_argument(
+        "--shard", type=int, default=0,
+        help="Номер шарда (0-indexed). Каждый шард обрабатывает свою часть пар.",
+    )
+    parser.add_argument(
+        "--num-shards", type=int, default=1,
+        help="Общее количество шардов. При >1 каждый процесс пишет свой файл.",
+    )
     args = parser.parse_args()
 
-    output_path = Path(args.output)
+    # Шардирование: каждый процесс пишет в свой файл
+    if args.num_shards > 1:
+        shard_suffix = f"_shard{args.shard}"
+        output_path = Path(args.output).with_suffix("") / f"shard_{args.shard}.parquet"
+        output_path = Path(str(args.output).replace(".parquet", f"_shard{args.shard}.parquet"))
+        trace_path = TRACE_PATH.with_suffix(f".shard{args.shard}.jsonl")
+        log_path = LOG_DIR / f"agent_labeling_shard{args.shard}.log"
+        # Перенастраиваем файловый лог на шард
+        _file_handler.close()
+        logger.removeHandler(_file_handler)
+        fh = logging.FileHandler(log_path, encoding="utf-8")
+        fh.setLevel(logging.DEBUG)
+        fh.setFormatter(logging.Formatter("%(asctime)s  %(levelname)-8s  %(message)s"))
+        logger.addHandler(fh)
+    else:
+        output_path = Path(args.output)
+        trace_path = TRACE_PATH
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     t0 = time.time()
 
     # Открываем trace
+    global TRACE_PATH
+    TRACE_PATH = trace_path
     _open_trace()
-    logger.info("Trace: %s", TRACE_PATH)
-    logger.info("Лог:   %s", LOG_DIR / "agent_labeling.log")
+    logger.info("Shard: %d/%d", args.shard, args.num_shards)
+    logger.info("Trace: %s", trace_path)
+    logger.info("Output: %s", output_path)
 
-    # Загрузка кандидатов
-    input_path = Path(args.input)
-    if not input_path.exists():
-        logger.error("Файл %s не найден. Сначала запустите 12_label_real_data.py", input_path)
-        return
-
-    # Если есть частичный результат — продолжаем с него
+    # Если есть частичный результат разметки — продолжаем с него
     if output_path.exists():
         logger.info("Найден частичный результат %s, продолжаем...", output_path)
         candidates = pd.read_parquet(output_path)
+    elif args.skip_blocking and DEDUP_PATH.exists():
+        logger.info("Загрузка существующих кандидатов из %s", DEDUP_PATH)
+        candidates = pd.read_parquet(DEDUP_PATH)
     else:
-        candidates = pd.read_parquet(input_path)
-        logger.info("Загружено %d кандидатных пар из %s", len(candidates), input_path)
+        # Собственный блокинг с ослабленными параметрами
+        logger.info("=== Блокинг (threshold=%.2f, top_k=%d, dedup=%d) ===",
+                     SIMILARITY_THRESHOLD, TOP_K_FAISS, TOP_K_DEDUP)
+        nom, spec = load_and_clean()
+        nom_emb, spec_emb = get_embeddings(nom, spec)
+        distances, indices = faiss_blocking(nom_emb, spec_emb)
+        all_candidates, candidates = build_candidates(nom, spec, distances, indices)
+        all_candidates.to_parquet(CANDIDATES_PATH)
+        candidates.to_parquet(DEDUP_PATH)
+        logger.info("Кандидаты сохранены: %s", DEDUP_PATH)
 
-    # Создаём агента
-    logger.info("Модель: %s, host: %s", args.model, args.host)
-    executor = create_agent(args.model, args.host)
+    # Шардирование: берём свою часть
+    if args.num_shards > 1 and not output_path.exists():
+        n = len(candidates)
+        shard_size = n // args.num_shards
+        start = args.shard * shard_size
+        end = n if args.shard == args.num_shards - 1 else start + shard_size
+        candidates = candidates.iloc[start:end].reset_index(drop=True)
+        logger.info("Шард %d: строки %d-%d (%d пар)", args.shard, start, end - 1, len(candidates))
 
     # Разметка
+    logger.info("Модель: %s, host: %s", args.model, args.host)
+    executor = create_agent(args.model, args.host)
     candidates = label_candidates(candidates, executor, output_path)
     candidates.to_parquet(output_path)
 
