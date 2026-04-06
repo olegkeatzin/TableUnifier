@@ -326,6 +326,7 @@ def label_candidates(
     candidates: pd.DataFrame,
     client: ollama.Client,
     model: str,
+    output_path: Path = OUTPUT_PATH,
 ) -> pd.DataFrame:
     """Разметить кандидатов через агента.
 
@@ -376,7 +377,7 @@ def label_candidates(
 
         # Периодическое сохранение
         if (i + 1) % SAVE_EVERY == 0:
-            candidates.to_parquet(OUTPUT_PATH)
+            candidates.to_parquet(output_path)
             done = (candidates["label"] != -1).sum()
             logger.info(
                 "  Checkpoint %d/%d: размечено %d/%d, поисков %d, ошибок %d",
@@ -421,10 +422,6 @@ def main() -> None:
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Обновляем глобальный путь для checkpoint-ов
-    global OUTPUT_PATH
-    OUTPUT_PATH = output_path
-
     t0 = time.time()
 
     # Открываем trace
@@ -451,7 +448,7 @@ def main() -> None:
     logger.info("Модель: %s, host: %s", args.model, args.host)
 
     # Разметка
-    candidates = label_candidates(candidates, client, args.model)
+    candidates = label_candidates(candidates, client, args.model, output_path)
     candidates.to_parquet(output_path)
 
     # Статистика
