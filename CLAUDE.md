@@ -38,6 +38,13 @@ uv run python experiments/08_build_unified_graph.py
 uv run python experiments/09_train_gat.py
 uv run python experiments/10_evaluate.py
 uv run python experiments/11_train_gat_bce.py
+uv run python experiments/12_label_real_data.py
+uv run python experiments/13_label_with_agent.py   # требует gemma4:26b + интернет
+```
+
+### Experiment Tracking
+```bash
+uv run mlflow ui --backend-store-uri sqlite:///mlflow.db  # View results at http://localhost:5000
 ```
 
 ### External Services Required
@@ -89,22 +96,24 @@ CSV Tables
 
 ### Module Map
 
-| Модуль | Файл | Назначение |
-|--------|------|-----------|
-| `config.py` | Config | Все конфиги как датаклассы |
-| `ollama_client.py` | Client | Обёртка над Ollama API |
-| `dataset/download.py` | Data | Скачивание с Magellan |
-| `dataset/embedding_generation.py` | Data | rubert-tiny2 + Ollama embeddings |
-| `dataset/graph_builder.py` | Data | Построение HeteroData графов |
-| `dataset/pair_sampling.py` | Data | Генерация пар/триплетов |
-| `dataset/schema_augmentation.py` | Data | LLM-синонимы столбцов (аугментация) |
-| `dataset/value_corruption.py` | Data | Порча значений ячеек (typo, format, drop) |
-| `models/schema_matching.py` | Model | SchemaProjector |
-| `models/entity_resolution.py` | Model | EntityResolutionGNN |
-| `models/gnn_layer.py` | Model | EdgeMeanConv layer |
-| `models/gat_layer.py` | Model | GATv2 layer с edge features |
-| `models/losses.py` | Model | TripletLoss + полу-жёсткий майнинг |
-| `evaluation/clustering.py` | Eval | Threshold sweep (F1), ROC-AUC, HDBSCAN clustering |
-| `dataset/data_split.py` | Data | Стратифицированный split по связным компонентам |
-| `training/schema_trainer.py` | Train | Обучение SchemaProjector |
-| `training/er_trainer.py` | Train | Обучение ER модели (single/multi) |
+All paths relative to `src/table_unifier/`:
+
+| Модуль | Назначение |
+|--------|-----------|
+| `config.py` | Все конфиги как датаклассы |
+| `ollama_client.py` | Обёртка над Ollama API |
+| `dataset/download.py` | Скачивание с Magellan Data Repository |
+| `dataset/embedding_generation.py` | rubert-tiny2 + Ollama embeddings |
+| `dataset/graph_builder.py` | Построение HeteroData графов |
+| `dataset/pair_sampling.py` | Генерация пар/триплетов для обучения |
+| `dataset/data_split.py` | Стратифицированный split по связным компонентам |
+| `dataset/schema_augmentation.py` | LLM-синонимы столбцов (аугментация) |
+| `dataset/value_corruption.py` | Порча значений ячеек (typo, format, drop) |
+| `models/schema_matching.py` | SchemaProjector |
+| `models/entity_resolution.py` | EntityResolutionGNN |
+| `models/gnn_layer.py` | EdgeMeanConv layer |
+| `models/gat_layer.py` | GATv2 layer с edge features |
+| `models/losses.py` | TripletLoss + полу-жёсткий майнинг |
+| `evaluation/clustering.py` | Threshold sweep (F1), ROC-AUC, HDBSCAN clustering |
+| `training/schema_trainer.py` | Обучение SchemaProjector |
+| `training/er_trainer.py` | Обучение ER модели (single/multi-dataset) |
