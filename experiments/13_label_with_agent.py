@@ -225,8 +225,7 @@ def label_one_pair(
     """
     question = (
         f'Спецификация: "{spec_text}"\n'
-        f'Номенклатура: "{nom_text}"\n'
-        f"Cosine similarity: {cosine_sim:.3f}\n\n"
+        f'Номенклатура: "{nom_text}"\n\n'
         f"Это один и тот же товар? Используй web_search если не уверен."
     )
 
