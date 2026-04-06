@@ -237,9 +237,9 @@ def build_candidates(
 _trace_file = None
 
 
-def _open_trace():
+def _open_trace(path: Path = TRACE_PATH):
     global _trace_file
-    _trace_file = open(TRACE_PATH, "a", encoding="utf-8")
+    _trace_file = open(path, "a", encoding="utf-8")
 
 
 def _write_trace(record: dict) -> None:
@@ -610,8 +610,6 @@ def main() -> None:
 
     # Шардирование: каждый процесс пишет в свой файл
     if args.num_shards > 1:
-        shard_suffix = f"_shard{args.shard}"
-        output_path = Path(args.output).with_suffix("") / f"shard_{args.shard}.parquet"
         output_path = Path(str(args.output).replace(".parquet", f"_shard{args.shard}.parquet"))
         trace_path = TRACE_PATH.with_suffix(f".shard{args.shard}.jsonl")
         log_path = LOG_DIR / f"agent_labeling_shard{args.shard}.log"
@@ -630,9 +628,7 @@ def main() -> None:
     t0 = time.time()
 
     # Открываем trace
-    global TRACE_PATH
-    TRACE_PATH = trace_path
-    _open_trace()
+    _open_trace(trace_path)
     logger.info("Shard: %d/%d", args.shard, args.num_shards)
     logger.info("Trace: %s", trace_path)
     logger.info("Output: %s", output_path)
