@@ -396,11 +396,11 @@ def label_candidates(
             total_searches += result["searches"]
 
         except Exception as e:
-            logger.error("Ошибка на паре %d: %s", idx, e)
+            logger.error("Ошибка на паре %d: %s", idx, e, exc_info=True)
             errors += 1
 
-        # Периодическое сохранение
-        if (i + 1) % SAVE_EVERY == 0:
+        # Периодическое сохранение (+ после первой пары для быстрого feedback)
+        if (i + 1) % SAVE_EVERY == 0 or i == 0:
             candidates.to_parquet(output_path)
             done = (candidates["label"] != -1).sum()
             logger.info(
