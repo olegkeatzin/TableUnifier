@@ -1,4 +1,10 @@
-"""Разметка реальных данных: LangGraph ReAct-агент с веб-поиском.
+"""Разметка реальных данных: LangGraph ReAct-агент с веб-поиском (v2).
+
+Улучшения по сравнению с v1:
+  - Строгие параметры блокинга (как в exp 12): threshold=0.7, top_k=10, dedup=3
+  - Улучшенный промпт с few-shot примерами из ручной верификации (12_verify_labels)
+  - Акцент на поэлементном сравнении параметров (допуск, модификация, серия)
+  - Переиспользует кандидатов из exp 12 (candidates_dedup.parquet) через --skip-blocking
 
 Сравнение с 12_label_real_data.py:
   - Использует gemma4:26b через LangGraph create_react_agent (нативный tool calling)
@@ -67,15 +73,17 @@ DATA_DIR = Path("data/labeled")
 EMBEDDINGS_CACHE = DATA_DIR / "embeddings_cache.npz"  # общий с экспериментом 12
 CANDIDATES_PATH = DATA_DIR / "candidates_agent.parquet"
 DEDUP_PATH = DATA_DIR / "candidates_agent_dedup.parquet"
+# Кандидаты из эксперимента 12 (для --skip-blocking)
+EXP12_DEDUP_PATH = DATA_DIR / "candidates_dedup.parquet"
 OUTPUT_PATH = DATA_DIR / "labeled_pairs_agent.parquet"
 TRACE_PATH = DATA_DIR / "agent_traces.jsonl"
 
 # ------------------------------------------------------------------ #
-#  Параметры блокинга (ослабленные vs эксперимент 12)
+#  Параметры блокинга (как в эксперименте 12 — строгие)
 # ------------------------------------------------------------------ #
-TOP_K_FAISS = 30             # было 10 — больше кандидатов
-TOP_K_DEDUP = 10             # было 3 — больше пар после дедупликации
-SIMILARITY_THRESHOLD = 0.5   # было 0.7 — мягче порог
+TOP_K_FAISS = 10             # как в exp 12
+TOP_K_DEDUP = 3              # как в exp 12
+SIMILARITY_THRESHOLD = 0.7   # как в exp 12
 
 # ------------------------------------------------------------------ #
 #  Параметры агента
@@ -250,7 +258,7 @@ def _write_trace(record: dict) -> None:
 
 
 # ------------------------------------------------------------------ #
-#  Structured output (Pydantic)
+#  Submit answer tool (вместо structured output)
 # ------------------------------------------------------------------ #
 
 class MatchResult(BaseModel):
@@ -260,14 +268,82 @@ class MatchResult(BaseModel):
     reasoning: str = Field(description="одно предложение с обоснованием")
 
 
-SYSTEM_PROMPT = (
-    "Ты эксперт по сопоставлению номенклатуры электронных компонентов.\n"
-    "Определи, описывают ли две записи ОДИН И ТОТ ЖЕ товар.\n\n"
-    "Правила: совпадение децимальных номеров/артикулов = match. "
-    "Разные модификации (-01/-02), допуски (±5%/±10%), номиналы = НЕ match. "
-    "Сокращения и порядок слов могут отличаться.\n\n"
-    "Используй web_search если не уверен в расшифровке обозначения компонента."
-)
+# Хранилище последнего ответа — заполняется при вызове submit_answer tool
+_last_answer: dict | None = None
+
+
+def _submit_answer(match: bool, confidence: str, reasoning: str) -> str:
+    """Зафиксировать финальный ответ. Вызови этот tool ОДИН раз после анализа."""
+    global _last_answer
+    _last_answer = {
+        "match": match,
+        "confidence": confidence,
+        "reasoning": reasoning,
+    }
+    return "Ответ принят."
+
+
+SYSTEM_PROMPT = """\
+Ты эксперт по сопоставлению номенклатуры электронных компонентов.
+Определи, описывают ли две записи ОДИН И ТОТ ЖЕ товар (конкретную позицию для закупки).
+
+=== ПРАВИЛА ===
+1. MATCH — записи описывают один и тот же товар, пригодный для взаимной замены в заказе.
+2. NO MATCH — записи описывают разные товары, даже если они из одной серии.
+
+=== КРИТЕРИИ MATCH ===
+- Совпадение децимального номера (АЖЯР.xxx, ШКАБ.xxx, ОЮ0.xxx) при одинаковых параметрах.
+- Одинаковый тип + номинал + допуск + напряжение + модификация.
+- Различия ТОЛЬКО в форматировании: пробелы, регистр, тире/дефис, запятая/точка в числах,
+  порядок слов, сокращения (мкФ/мкф, кОм/К, пФ/пф).
+
+=== КРИТЕРИИ NO MATCH (даже при похожих названиях!) ===
+- Разные допуски: ±5% vs ±10%, ±10% vs ±20%, ±10% vs ±30% — это РАЗНЫЕ товары.
+- Разные модификации: -01 vs -02, тип 1 (т1) vs тип 13 (т13), -А vs -Б.
+- Разные серии/подтипы: К10-17А vs К10-17В, МПО vs Н20.
+- Разные номиналы: 100 пФ vs 1000 пФ, 1.5 кОм vs 9.1 кОм.
+- Разное напряжение: 10В vs 6.3В, 100В vs 250В.
+- Один текст — общее описание (только номинал), другой — конкретная марка с артикулом.
+
+=== ПРИМЕРЫ ===
+
+MATCH:
+  A: "Р1-12-0,125-1,5 кОм± 5 % -М | ШКАБ.434110.002 ТУ"
+  B: "Р1-12-0,125-1,5 кОм±5 %-М-А | Р1-12-0,125-1,5 кОм±5 %-М-А ШКАБ.434110.002 ТУ"
+  → MATCH: тот же резистор, -М-А это расширенное обозначение -М, ТУ совпадает.
+
+MATCH:
+  A: "Вставка плавкая ВП1-1В 2,0 А 250 В | ОЮ0.480.003 ТУ-Р"
+  B: "Вставка плавкая ВП1-1В 2,0 А 250 В – ОЮ0.480.003 ТУ-Р"
+  → MATCH: идентичные параметры, различие только в разделителе (| vs –).
+
+NO MATCH:
+  A: "0,125-9,1 кОм ± 5 % -А-Д-В | ОЖ0.467.093 ТУ"
+  B: "Р1-12-0,125-9,1 К 5% | Артикул: 412050"
+  → NO MATCH: A — общее описание без марки, B — конкретный Р1-12. Невозможно подтвердить.
+
+NO MATCH:
+  A: "К53-56А-6,3 В-47 мкФ±10% | АЖЯР.673546.001 ТУ"
+  B: "К53-56А-6.3 В-47 мкФ±30 % | АЖЯР.673546.001 ТУ"
+  → NO MATCH: допуск ±10% ≠ ±30%, хотя всё остальное совпадает.
+
+NO MATCH:
+  A: "100 пФ+-5 % 100 В | Код: 27.90.60.000 | ТУРБ 14576608.003-96"
+  B: "К10-17А-МПО-100В-100 5% т1 | Артикул: 420837"
+  → NO MATCH: A — общее описание конденсатора, B — конкретный К10-17А-МПО тип 1.
+
+NO MATCH:
+  A: "Н20-6800 пФ ± 20 %-2 | АЕЯР.431260.734 ТУ"
+  B: "К10-17В-Н20-6800 20% т2 | Артикул: 420456"
+  → NO MATCH: A описывает характеристику (Н20), B — конкретный К10-17В. Разные уровни спецификации.
+
+=== ИНСТРУКЦИИ ===
+- Сначала выдели ключевые параметры из обеих записей: тип, серия, номинал, допуск, напряжение, ТУ.
+- Сравни параметры поэлементно. Если ЛЮБОЙ параметр отличается — NO MATCH.
+- Используй web_search только если не можешь расшифровать обозначение компонента.
+- При сомнении — NO MATCH с confidence="medium".
+- ОБЯЗАТЕЛЬНО вызови submit_answer с финальным результатом.
+"""
 
 
 # ------------------------------------------------------------------ #
@@ -275,7 +351,9 @@ SYSTEM_PROMPT = (
 # ------------------------------------------------------------------ #
 
 def create_agent(model: str, host: str):
-    """Создать LangGraph ReAct-агента с нативным tool calling и structured output."""
+    """Создать LangGraph ReAct-агента с web_search и submit_answer tools."""
+    from langchain_core.tools import StructuredTool
+
     llm = ChatOllama(
         model=model,
         base_url=host,
@@ -289,11 +367,21 @@ def create_agent(model: str, host: str):
         "компонентах, кодах продукции, децимальных номерах и технических "
         "характеристиках. Input: поисковый запрос на русском или английском."
     )
+
+    submit_tool = StructuredTool.from_function(
+        func=_submit_answer,
+        name="submit_answer",
+        description=(
+            "Зафиксировать финальный ответ после анализа пары. "
+            "ОБЯЗАТЕЛЬНО вызови этот tool ровно один раз в конце."
+        ),
+        args_schema=MatchResult,
+    )
+
     return create_react_agent(
         model=llm,
-        tools=[search],
+        tools=[search, submit_tool],
         prompt=SYSTEM_PROMPT,
-        response_format=MatchResult,
         name="component_matcher",
     )
 
@@ -314,6 +402,8 @@ def _extract_trace(messages: list) -> tuple[list[dict], int]:
                     })
                     if tc["name"] == "web_search":
                         searches += 1
+                    elif tc["name"] == "submit_answer":
+                        steps[-1]["type"] = "submit"
             elif msg.content:
                 logger.debug("  AI: %s", str(msg.content)[:500])
                 steps.append({"type": "ai", "output": str(msg.content)})
@@ -344,7 +434,7 @@ def label_one_pair(
     question = (
         f'Запись A: "{spec_text}"\n'
         f'Запись B: "{nom_text}"\n'
-        f"Это один товар?"
+        f"Проанализируй и вызови submit_answer с результатом."
     )
 
     logger.debug("=" * 80)
@@ -352,11 +442,15 @@ def label_one_pair(
     logger.debug("  SPEC: %s", spec_text)
     logger.debug("  NOM:  %s", nom_text)
 
+    global _last_answer
+    _last_answer = None
+
     t_start = time.monotonic()
     last_err = None
     response = None
     for attempt in range(3):
         try:
+            _last_answer = None  # сбросить перед каждой попыткой
             response = graph.invoke(
                 {"messages": [HumanMessage(content=question)]},
                 config={"recursion_limit": MAX_AGENT_ITERATIONS * 2 + 1},
@@ -376,29 +470,26 @@ def label_one_pair(
     messages = response["messages"]
     steps, searches = _extract_trace(messages)
 
-    # structured_response заполняется langgraph при response_format
-    structured: MatchResult | None = response.get("structured_response")
-
-    if structured is not None:
+    if _last_answer is not None:
         result = {
-            "match": structured.match,
-            "confidence": structured.confidence,
-            "reasoning": structured.reasoning,
+            "match": _last_answer["match"],
+            "confidence": _last_answer["confidence"],
+            "reasoning": _last_answer["reasoning"],
             "searches": searches,
-            "raw_response": structured.model_dump_json(),
+            "raw_response": json.dumps(_last_answer, ensure_ascii=False),
         }
     else:
-        # Фолбэк: structured output не сработал
+        # Фолбэк: агент не вызвал submit_answer
         raw = ""
         for msg in reversed(messages):
             if msg.type == "ai" and msg.content:
                 raw = str(msg.content)
                 break
-        logger.warning("Structured output не вернулся, raw: %s", raw[:200])
+        logger.warning("submit_answer не вызван, raw: %s", raw[:200])
         result = {
             "match": False,
             "confidence": "low",
-            "reasoning": f"PARSE_ERROR: {raw[:200]}",
+            "reasoning": f"NO_SUBMIT: {raw[:200]}",
             "searches": searches,
             "raw_response": raw,
         }
@@ -643,9 +734,17 @@ def main() -> None:
     if candidates is None and output_path.exists():
         logger.info("Найден частичный результат %s, продолжаем...", output_path)
         candidates = pd.read_parquet(output_path)
-    elif candidates is None and args.skip_blocking and DEDUP_PATH.exists():
-        logger.info("Загрузка существующих кандидатов из %s", DEDUP_PATH)
-        candidates = pd.read_parquet(DEDUP_PATH)
+    elif candidates is None and args.skip_blocking:
+        # Приоритет: собственные кандидаты агента → кандидаты из exp 12
+        if DEDUP_PATH.exists():
+            logger.info("Загрузка кандидатов агента из %s", DEDUP_PATH)
+            candidates = pd.read_parquet(DEDUP_PATH)
+        elif EXP12_DEDUP_PATH.exists():
+            logger.info("Загрузка кандидатов из эксперимента 12: %s", EXP12_DEDUP_PATH)
+            candidates = pd.read_parquet(EXP12_DEDUP_PATH)
+        else:
+            logger.error("Нет кандидатов для --skip-blocking: ни %s, ни %s", DEDUP_PATH, EXP12_DEDUP_PATH)
+            return
     elif candidates is None:
         # Собственный блокинг с ослабленными параметрами
         logger.info("=== Блокинг (threshold=%.2f, top_k=%d, dedup=%d) ===",
