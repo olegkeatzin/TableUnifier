@@ -30,6 +30,7 @@ dependencies = [
     "langchain>=1.2.15",
     "langchain-ollama>=1.0.1",
     "langchain-community>=0.4.1",
+    "langgraph>=0.4",
     "ddgs>=9.12.1",
 ]
 

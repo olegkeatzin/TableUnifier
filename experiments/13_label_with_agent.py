@@ -1,9 +1,8 @@
-"""Разметка реальных данных: LangChain ReAct-агент с веб-поиском.
+"""Разметка реальных данных: LangGraph ReAct-агент с веб-поиском.
 
 Сравнение с 12_label_real_data.py:
-  - Использует gemma4:26b через LangChain ReAct-агент (prompt-based tool calling)
+  - Использует gemma4:26b через LangGraph create_react_agent (нативный tool calling)
   - Агент может вызывать веб-поиск для уточнения информации о компонентах
-  - Не зависит от нативного tool calling модели — работает через Thought/Action/Observation
   - Результат сохраняется отдельно для сравнения качества
 
 Требования:
@@ -28,11 +27,10 @@ from pathlib import Path
 import faiss
 import numpy as np
 import pandas as pd
-from langchain_classic.agents import AgentExecutor, create_react_agent
 from langchain_community.tools import DuckDuckGoSearchRun
-from langchain_core.callbacks import BaseCallbackHandler
-from langchain_core.prompts import PromptTemplate
+from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_ollama import ChatOllama
+from langgraph.prebuilt import create_react_agent
 from tqdm import tqdm
 
 from table_unifier.dataset.embedding_generation import TokenEmbedder
@@ -251,86 +249,32 @@ def _write_trace(record: dict) -> None:
 
 
 # ------------------------------------------------------------------ #
-#  LangChain callback для логирования trace
+#  Системный промпт
 # ------------------------------------------------------------------ #
 
-class TraceCallback(BaseCallbackHandler):
-    """Собирает шаги агента (мысли, tool calls, результаты) для логирования."""
-
-    def __init__(self):
-        self.steps: list[dict] = []
-        self.searches = 0
-
-    def on_agent_action(self, action, **kwargs):
-        """Агент решил вызвать инструмент."""
-        logger.debug("  ACTION: %s(%r)", action.tool, action.tool_input)
-        self.steps.append({
-            "type": "action",
-            "tool": action.tool,
-            "input": action.tool_input,
-            "thought": action.log.strip(),
-        })
-        if action.tool == "web_search":
-            self.searches += 1
-
-    def on_tool_end(self, output, **kwargs):
-        """Инструмент вернул результат."""
-        output_str = str(output)
-        logger.debug("  OBSERVATION (%d chars): %s", len(output_str), output_str[:500])
-        self.steps.append({
-            "type": "observation",
-            "output_length": len(output_str),
-            "output_preview": output_str[:1000],
-        })
-
-    def on_agent_finish(self, finish, **kwargs):
-        """Агент дал финальный ответ."""
-        logger.debug("  FINAL: %s", finish.log.strip())
-        self.steps.append({
-            "type": "final",
-            "output": finish.return_values.get("output", ""),
-            "log": finish.log.strip(),
-        })
-
-
-# ------------------------------------------------------------------ #
-#  ReAct промпт
-# ------------------------------------------------------------------ #
-
-REACT_PROMPT = PromptTemplate.from_template("""\
+SYSTEM_PROMPT = """\
 Ты эксперт по сопоставлению номенклатуры электронных компонентов.
 Определи, описывают ли две записи ОДИН И ТОТ ЖЕ товар.
 
 Правила: совпадение децимальных номеров/артикулов = match. Разные модификации (-01/-02), допуски (±5%/±10%), номиналы = НЕ match. Сокращения и порядок слов могут отличаться.
 
-Инструменты: {tools}
-Названия: {tool_names}
+Используй web_search если не уверен в расшифровке обозначения компонента.
 
-Формат:
-Thought: краткие рассуждения (2-3 предложения)
-Action: <имя инструмента>
-Action Input: <запрос>
-
-Или финальный ответ:
-Thought: краткий вывод
-Final Answer: {{"match": true/false, "confidence": "high"/"medium"/"low", "reasoning": "одно предложение"}}
-
-ВАЖНО: рассуждения должны быть КРАТКИМИ. Не пиши длинный анализ.
-
-Вопрос: {input}
-{agent_scratchpad}""")
+ФОРМАТ ОТВЕТА — строго JSON, ничего кроме JSON:
+{"match": true/false, "confidence": "high"/"medium"/"low", "reasoning": "одно предложение"}
+"""
 
 
 # ------------------------------------------------------------------ #
-#  Агентный цикл
+#  Агентный цикл (LangGraph)
 # ------------------------------------------------------------------ #
 
-def create_agent(model: str, host: str) -> AgentExecutor:
-    """Создать LangChain ReAct-агента."""
+def create_langgraph_agent(model: str, host: str):
+    """Создать LangGraph ReAct-агента с нативным tool calling."""
     llm = ChatOllama(
         model=model,
         base_url=host,
-        num_predict=4096,
+        num_predict=512,
         temperature=0,
     )
     search = DuckDuckGoSearchRun()
@@ -340,34 +284,64 @@ def create_agent(model: str, host: str) -> AgentExecutor:
         "компонентах, кодах продукции, децимальных номерах и технических "
         "характеристиках. Input: поисковый запрос на русском или английском."
     )
-    tools = [search]
-    agent = create_react_agent(llm, tools, REACT_PROMPT)
-    return AgentExecutor(
-        agent=agent,
-        tools=tools,
-        max_iterations=MAX_AGENT_ITERATIONS,
-        handle_parsing_errors=True,
-        verbose=False,  # логируем через callback
+    graph = create_react_agent(
+        model=llm,
+        tools=[search],
+        prompt=SYSTEM_PROMPT,
     )
+    return graph
+
+
+def _extract_trace(messages: list) -> tuple[list[dict], int]:
+    """Извлечь шаги и число поисков из сообщений LangGraph."""
+    steps = []
+    searches = 0
+    for msg in messages:
+        if msg.type == "ai":
+            if msg.tool_calls:
+                for tc in msg.tool_calls:
+                    logger.debug("  TOOL CALL: %s(%r)", tc["name"], tc["args"])
+                    steps.append({
+                        "type": "action",
+                        "tool": tc["name"],
+                        "input": tc["args"],
+                    })
+                    if tc["name"] == "web_search":
+                        searches += 1
+            if msg.content and not msg.tool_calls:
+                logger.debug("  FINAL: %s", str(msg.content)[:500])
+                steps.append({
+                    "type": "final",
+                    "output": str(msg.content),
+                })
+        elif msg.type == "tool":
+            output_str = str(msg.content)
+            logger.debug("  OBSERVATION (%d chars): %s", len(output_str), output_str[:500])
+            steps.append({
+                "type": "observation",
+                "output_length": len(output_str),
+                "output_preview": output_str[:1000],
+            })
+    return steps, searches
 
 
 def label_one_pair(
-    executor: AgentExecutor,
+    graph,
     pair_idx: int,
     spec_text: str,
     nom_text: str,
     cosine_sim: float,
 ) -> dict:
-    """Разметить одну пару через ReAct-агента.
+    """Разметить одну пару через LangGraph-агента.
 
     Returns:
         {"match": bool, "confidence": str, "reasoning": str,
          "searches": int, "raw_response": str}
     """
     question = (
-        f'Спецификация: "{spec_text}"\n'
-        f'Номенклатура: "{nom_text}"\n\n'
-        f"Это один и тот же товар? Используй web_search если не уверен."
+        f'Запись A: "{spec_text}"\n'
+        f'Запись B: "{nom_text}"\n'
+        f"Это один товар? Ответь JSON."
     )
 
     logger.debug("=" * 80)
@@ -375,20 +349,24 @@ def label_one_pair(
     logger.debug("  SPEC: %s", spec_text)
     logger.debug("  NOM:  %s", nom_text)
 
-    cb = TraceCallback()
     t_start = time.monotonic()
-    response = executor.invoke({"input": question}, config={"callbacks": [cb]})
+    response = graph.invoke(
+        {"messages": [HumanMessage(content=question)]},
+        config={"recursion_limit": MAX_AGENT_ITERATIONS * 2 + 1},
+    )
     elapsed_ms = (time.monotonic() - t_start) * 1000
 
-    raw_output = response.get("output", "")
-    # Если в output нет JSON, ищем в полном логе агента (рассуждения + Final Answer)
-    full_log = "\n".join(
-        s.get("log", "") or s.get("content", "") or s.get("output", "")
-        for s in cb.steps
-    )
-    result = _parse_final(raw_output, cb.searches)
-    if result["reasoning"].startswith("PARSE_ERROR"):
-        result = _parse_final(full_log + "\n" + raw_output, cb.searches)
+    messages = response["messages"]
+    steps, searches = _extract_trace(messages)
+
+    # Финальный ответ — последнее AI-сообщение без tool_calls
+    raw_output = ""
+    for msg in reversed(messages):
+        if msg.type == "ai" and not msg.tool_calls and msg.content:
+            raw_output = str(msg.content)
+            break
+
+    result = _parse_final(raw_output, searches)
 
     # Trace
     trace = {
@@ -396,7 +374,7 @@ def label_one_pair(
         "spec_text": spec_text,
         "nom_text": nom_text,
         "cosine_sim": cosine_sim,
-        "steps": cb.steps,
+        "steps": steps,
         "result": result,
         "elapsed_ms": round(elapsed_ms),
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -508,7 +486,7 @@ def _fallback_parse(raw: str, searches: int) -> dict:
 
 def label_candidates(
     candidates: pd.DataFrame,
-    executor: AgentExecutor,
+    graph,
     output_path: Path = OUTPUT_PATH,
 ) -> pd.DataFrame:
     """Разметить кандидатов через ReAct-агента.
@@ -542,7 +520,7 @@ def label_candidates(
 
         try:
             result = label_one_pair(
-                executor, idx,
+                graph, idx,
                 row["spec_text"], row["nom_text"], row["cosine_sim"],
             )
             candidates.at[idx, "label"] = 1 if result["match"] else 0
@@ -572,6 +550,80 @@ def label_candidates(
         labeled_count, total_searches, errors,
     )
     return candidates
+
+
+# ------------------------------------------------------------------ #
+#  Объединение шардов
+# ------------------------------------------------------------------ #
+
+def merge_shards(output_path: Path) -> pd.DataFrame | None:
+    """Найти и объединить шард-файлы в единый parquet + trace + лог.
+
+    Возвращает объединённый DataFrame или None если шардов нет.
+    """
+    shard_files = sorted(output_path.parent.glob("labeled_pairs_agent_shard*.parquet"))
+    if not shard_files:
+        return None
+
+    logger.info("Найдено %d шард-файлов: %s", len(shard_files), [f.name for f in shard_files])
+
+    # Объединяем parquet
+    dfs = []
+    for f in shard_files:
+        df = pd.read_parquet(f)
+        logger.info("  %s: %d строк, размечено %d", f.name, len(df),
+                     (df["label"] != -1).sum() if "label" in df.columns else 0)
+        dfs.append(df)
+    merged = pd.concat(dfs, ignore_index=True)
+
+    # Дедупликация по spec_text + nom_text (на случай пересечений)
+    before = len(merged)
+    merged = merged.drop_duplicates(subset=["spec_text", "nom_text"], keep="first").reset_index(drop=True)
+    if len(merged) < before:
+        logger.info("  Удалено %d дубликатов при объединении", before - len(merged))
+
+    # Дополнить пары из dedup, которые не попали ни в один шард
+    if DEDUP_PATH.exists():
+        dedup = pd.read_parquet(DEDUP_PATH)
+        merged_keys = set(zip(merged["spec_text"], merged["nom_text"]))
+        missing = dedup[
+            ~dedup.apply(lambda r: (r["spec_text"], r["nom_text"]) in merged_keys, axis=1)
+        ]
+        if len(missing) > 0:
+            logger.info("  Добавлено %d пар из dedup, отсутствующих в шардах", len(missing))
+            merged = pd.concat([merged, missing], ignore_index=True)
+
+    logger.info("Объединено: %d строк, размечено %d",
+                len(merged), (merged["label"] != -1).sum() if "label" in merged.columns else 0)
+
+    # Сохраняем объединённый файл
+    merged.to_parquet(output_path)
+    logger.info("Сохранено в %s", output_path)
+
+    # Объединяем trace JSONL
+    trace_shards = sorted(output_path.parent.glob("agent_traces.shard*.jsonl"))
+    if trace_shards:
+        with open(TRACE_PATH, "a", encoding="utf-8") as out:
+            for tf in trace_shards:
+                out.write(tf.read_text(encoding="utf-8"))
+        logger.info("Trace объединён из %d шардов в %s", len(trace_shards), TRACE_PATH)
+
+    # Объединяем логи
+    log_shards = sorted(output_path.parent.glob("agent_labeling_shard*.log"))
+    if log_shards:
+        main_log = LOG_DIR / "agent_labeling.log"
+        with open(main_log, "a", encoding="utf-8") as out:
+            for lf in log_shards:
+                out.write(f"\n{'='*60} {lf.name} {'='*60}\n")
+                out.write(lf.read_text(encoding="utf-8"))
+        logger.info("Логи объединены из %d шардов в %s", len(log_shards), main_log)
+
+    # Переименовываем шард-файлы чтобы не объединять повторно
+    for f in shard_files + trace_shards + log_shards:
+        f.rename(f.with_suffix(f.suffix + ".merged"))
+        logger.info("  Переименован: %s → %s", f.name, f.name + ".merged")
+
+    return merged
 
 
 # ------------------------------------------------------------------ #
@@ -633,14 +685,21 @@ def main() -> None:
     logger.info("Trace: %s", trace_path)
     logger.info("Output: %s", output_path)
 
-    # Если есть частичный результат разметки — продолжаем с него
-    if output_path.exists():
+    # При запуске одним агентом — объединить шарды если есть
+    candidates = None
+    if args.num_shards == 1:
+        candidates = merge_shards(output_path)
+        if candidates is not None:
+            logger.info("Продолжаем разметку одним агентом после объединения шардов")
+
+    # Если кандидаты ещё не загружены — стандартная логика
+    if candidates is None and output_path.exists():
         logger.info("Найден частичный результат %s, продолжаем...", output_path)
         candidates = pd.read_parquet(output_path)
-    elif args.skip_blocking and DEDUP_PATH.exists():
+    elif candidates is None and args.skip_blocking and DEDUP_PATH.exists():
         logger.info("Загрузка существующих кандидатов из %s", DEDUP_PATH)
         candidates = pd.read_parquet(DEDUP_PATH)
-    else:
+    elif candidates is None:
         # Собственный блокинг с ослабленными параметрами
         logger.info("=== Блокинг (threshold=%.2f, top_k=%d, dedup=%d) ===",
                      SIMILARITY_THRESHOLD, TOP_K_FAISS, TOP_K_DEDUP)
@@ -663,8 +722,8 @@ def main() -> None:
 
     # Разметка
     logger.info("Модель: %s, host: %s", args.model, args.host)
-    executor = create_agent(args.model, args.host)
-    candidates = label_candidates(candidates, executor, output_path)
+    graph = create_langgraph_agent(args.model, args.host)
+    candidates = label_candidates(candidates, graph, output_path)
     candidates.to_parquet(output_path)
 
     # Статистика

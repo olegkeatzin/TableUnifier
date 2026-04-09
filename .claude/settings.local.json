@@ -14,7 +14,8 @@
       "Bash(python -c \"from torch_geometric.nn import GraphNorm; print\\(''GraphNorm available''\\)\")",
       "Bash(python:*)",
       "Bash(ls experiments/v3_*)",
-      "Bash(python3 -c ':*)"
+      "Bash(python3 -c ':*)",
+      "WebSearch"
     ]
   }
 }
