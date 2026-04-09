@@ -73,8 +73,9 @@ DATA_DIR = Path("data/labeled")
 EMBEDDINGS_CACHE = DATA_DIR / "embeddings_cache.npz"  # общий с экспериментом 12
 CANDIDATES_PATH = DATA_DIR / "candidates_agent.parquet"
 DEDUP_PATH = DATA_DIR / "candidates_agent_dedup.parquet"
-# Кандидаты из эксперимента 12 (для --skip-blocking)
+# Файлы из эксперимента 12 (для --skip-blocking)
 EXP12_DEDUP_PATH = DATA_DIR / "candidates_dedup.parquet"
+EXP12_CANDIDATES_PATH = DATA_DIR / "candidates.parquet"
 OUTPUT_PATH = DATA_DIR / "labeled_pairs_agent.parquet"
 TRACE_PATH = DATA_DIR / "agent_traces.jsonl"
 
@@ -731,19 +732,28 @@ def main() -> None:
             logger.info("Продолжаем разметку одним агентом после объединения шардов")
 
     # Если кандидаты ещё не загружены — стандартная логика
-    if candidates is None and output_path.exists():
-        logger.info("Найден частичный результат %s, продолжаем...", output_path)
-        candidates = pd.read_parquet(output_path)
-    elif candidates is None and args.skip_blocking:
-        # Приоритет: собственные кандидаты агента → кандидаты из exp 12
-        if DEDUP_PATH.exists():
-            logger.info("Загрузка кандидатов агента из %s", DEDUP_PATH)
-            candidates = pd.read_parquet(DEDUP_PATH)
-        elif EXP12_DEDUP_PATH.exists():
+    # NB: --skip-blocking имеет приоритет над resume из output_path,
+    # чтобы не подхватить старые результаты с другими параметрами блокинга.
+    if candidates is None and args.skip_blocking:
+        # Берём кандидатов из exp 12 (dedup или полные → дедуплицируем)
+        if EXP12_DEDUP_PATH.exists():
             logger.info("Загрузка кандидатов из эксперимента 12: %s", EXP12_DEDUP_PATH)
             candidates = pd.read_parquet(EXP12_DEDUP_PATH)
+        elif EXP12_CANDIDATES_PATH.exists():
+            logger.info("Загрузка полных кандидатов из exp 12: %s (дедупликация...)", EXP12_CANDIDATES_PATH)
+            all_cand = pd.read_parquet(EXP12_CANDIDATES_PATH)
+            all_cand = all_cand[all_cand["cosine_sim"] >= SIMILARITY_THRESHOLD]
+            candidates = (
+                all_cand
+                .drop_duplicates(subset=["spec_text", "nom_text"])
+                .sort_values("cosine_sim", ascending=False)
+                .groupby("spec_text")
+                .head(TOP_K_DEDUP)
+                .reset_index(drop=True)
+            )
+            logger.info("Дедуплицировано: %d пар", len(candidates))
         else:
-            logger.error("Нет кандидатов для --skip-blocking: ни %s, ни %s", DEDUP_PATH, EXP12_DEDUP_PATH)
+            logger.error("Нет кандидатов из exp 12: ни %s, ни %s", EXP12_DEDUP_PATH, EXP12_CANDIDATES_PATH)
             return
     elif candidates is None:
         # Собственный блокинг с ослабленными параметрами
@@ -756,6 +766,19 @@ def main() -> None:
         all_candidates.to_parquet(CANDIDATES_PATH)
         candidates.to_parquet(DEDUP_PATH)
         logger.info("Кандидаты сохранены: %s", DEDUP_PATH)
+
+    # Resume: подтянуть уже проставленные метки из предыдущего запуска
+    if output_path.exists() and args.skip_blocking:
+        prev = pd.read_parquet(output_path)
+        if len(prev) == len(candidates):
+            # Тот же набор кандидатов — подхватываем метки
+            logger.info("Resume: подхватываем метки из %s", output_path)
+            candidates = prev
+        else:
+            logger.info(
+                "Размер кандидатов изменился (%d → %d), начинаем разметку заново",
+                len(prev), len(candidates),
+            )
 
     # Шардирование: берём свою часть
     if args.num_shards > 1 and not output_path.exists():
