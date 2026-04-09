@@ -20,17 +20,18 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import re
 import time
 from pathlib import Path
+from typing import Literal
 
 import faiss
 import numpy as np
 import pandas as pd
 from langchain_community.tools import DuckDuckGoSearchRun
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage
 from langchain_ollama import ChatOllama
 from langgraph.prebuilt import create_react_agent
+from pydantic import BaseModel, Field
 from tqdm import tqdm
 
 from table_unifier.dataset.embedding_generation import TokenEmbedder
@@ -249,47 +250,52 @@ def _write_trace(record: dict) -> None:
 
 
 # ------------------------------------------------------------------ #
-#  Системный промпт
+#  Structured output (Pydantic)
 # ------------------------------------------------------------------ #
 
-SYSTEM_PROMPT = """\
-Ты эксперт по сопоставлению номенклатуры электронных компонентов.
-Определи, описывают ли две записи ОДИН И ТОТ ЖЕ товар.
+class MatchResult(BaseModel):
+    """Результат сопоставления двух записей."""
+    match: bool = Field(description="true если записи описывают один и тот же товар")
+    confidence: Literal["high", "medium", "low"] = Field(description="уверенность в ответе")
+    reasoning: str = Field(description="одно предложение с обоснованием")
 
-Правила: совпадение децимальных номеров/артикулов = match. Разные модификации (-01/-02), допуски (±5%/±10%), номиналы = НЕ match. Сокращения и порядок слов могут отличаться.
 
-Используй web_search если не уверен в расшифровке обозначения компонента.
-
-ФОРМАТ ОТВЕТА — строго JSON, ничего кроме JSON:
-{"match": true/false, "confidence": "high"/"medium"/"low", "reasoning": "одно предложение"}
-"""
+SYSTEM_PROMPT = (
+    "Ты эксперт по сопоставлению номенклатуры электронных компонентов.\n"
+    "Определи, описывают ли две записи ОДИН И ТОТ ЖЕ товар.\n\n"
+    "Правила: совпадение децимальных номеров/артикулов = match. "
+    "Разные модификации (-01/-02), допуски (±5%/±10%), номиналы = НЕ match. "
+    "Сокращения и порядок слов могут отличаться.\n\n"
+    "Используй web_search если не уверен в расшифровке обозначения компонента."
+)
 
 
 # ------------------------------------------------------------------ #
 #  Агентный цикл (LangGraph)
 # ------------------------------------------------------------------ #
 
-def create_langgraph_agent(model: str, host: str):
-    """Создать LangGraph ReAct-агента с нативным tool calling."""
+def create_agent(model: str, host: str):
+    """Создать LangGraph ReAct-агента с нативным tool calling и structured output."""
     llm = ChatOllama(
         model=model,
         base_url=host,
-        num_predict=512,
+        num_predict=1024,
         temperature=0,
     )
-    search = DuckDuckGoSearchRun()
+    search = DuckDuckGoSearchRun(max_results=3)
     search.name = "web_search"
     search.description = (
         "Поиск в интернете. Используй для поиска информации об электронных "
         "компонентах, кодах продукции, децимальных номерах и технических "
         "характеристиках. Input: поисковый запрос на русском или английском."
     )
-    graph = create_react_agent(
+    return create_react_agent(
         model=llm,
         tools=[search],
         prompt=SYSTEM_PROMPT,
+        response_format=MatchResult,
+        name="component_matcher",
     )
-    return graph
 
 
 def _extract_trace(messages: list) -> tuple[list[dict], int]:
@@ -308,12 +314,9 @@ def _extract_trace(messages: list) -> tuple[list[dict], int]:
                     })
                     if tc["name"] == "web_search":
                         searches += 1
-            if msg.content and not msg.tool_calls:
-                logger.debug("  FINAL: %s", str(msg.content)[:500])
-                steps.append({
-                    "type": "final",
-                    "output": str(msg.content),
-                })
+            elif msg.content:
+                logger.debug("  AI: %s", str(msg.content)[:500])
+                steps.append({"type": "ai", "output": str(msg.content)})
         elif msg.type == "tool":
             output_str = str(msg.content)
             logger.debug("  OBSERVATION (%d chars): %s", len(output_str), output_str[:500])
@@ -332,7 +335,7 @@ def label_one_pair(
     nom_text: str,
     cosine_sim: float,
 ) -> dict:
-    """Разметить одну пару через LangGraph-агента.
+    """Разметить одну пару через LangGraph-агента со structured output.
 
     Returns:
         {"match": bool, "confidence": str, "reasoning": str,
@@ -341,7 +344,7 @@ def label_one_pair(
     question = (
         f'Запись A: "{spec_text}"\n'
         f'Запись B: "{nom_text}"\n'
-        f"Это один товар? Ответь JSON."
+        f"Это один товар?"
     )
 
     logger.debug("=" * 80)
@@ -350,23 +353,57 @@ def label_one_pair(
     logger.debug("  NOM:  %s", nom_text)
 
     t_start = time.monotonic()
-    response = graph.invoke(
-        {"messages": [HumanMessage(content=question)]},
-        config={"recursion_limit": MAX_AGENT_ITERATIONS * 2 + 1},
-    )
+    last_err = None
+    response = None
+    for attempt in range(3):
+        try:
+            response = graph.invoke(
+                {"messages": [HumanMessage(content=question)]},
+                config={"recursion_limit": MAX_AGENT_ITERATIONS * 2 + 1},
+            )
+            break
+        except Exception as e:
+            last_err = e
+            logger.warning("  Attempt %d/3 failed: %s", attempt + 1, e)
+            if attempt < 2:
+                time.sleep(2 ** attempt)
     elapsed_ms = (time.monotonic() - t_start) * 1000
+
+    if response is None:
+        logger.error("  All 3 attempts failed for pair #%d", pair_idx)
+        raise last_err  # noqa: TRY200
 
     messages = response["messages"]
     steps, searches = _extract_trace(messages)
 
-    # Финальный ответ — последнее AI-сообщение без tool_calls
-    raw_output = ""
-    for msg in reversed(messages):
-        if msg.type == "ai" and not msg.tool_calls and msg.content:
-            raw_output = str(msg.content)
-            break
+    # structured_response заполняется langgraph при response_format
+    structured: MatchResult | None = response.get("structured_response")
 
-    result = _parse_final(raw_output, searches)
+    if structured is not None:
+        result = {
+            "match": structured.match,
+            "confidence": structured.confidence,
+            "reasoning": structured.reasoning,
+            "searches": searches,
+            "raw_response": structured.model_dump_json(),
+        }
+    else:
+        # Фолбэк: structured output не сработал
+        raw = ""
+        for msg in reversed(messages):
+            if msg.type == "ai" and msg.content:
+                raw = str(msg.content)
+                break
+        logger.warning("Structured output не вернулся, raw: %s", raw[:200])
+        result = {
+            "match": False,
+            "confidence": "low",
+            "reasoning": f"PARSE_ERROR: {raw[:200]}",
+            "searches": searches,
+            "raw_response": raw,
+        }
+
+    steps.append({"type": "final", "output": result["raw_response"]})
 
     # Trace
     trace = {
@@ -380,104 +417,14 @@ def label_one_pair(
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
     }
     _write_trace(trace)
-    _log_result(pair_idx, result, elapsed_ms)
-    return result
 
-
-def _log_result(pair_idx: int, result: dict, elapsed_ms: float) -> None:
-    """Лог-строка итога для пары."""
     match_str = "MATCH" if result["match"] else "NO MATCH"
     logger.debug(
         "  RESULT: %s (conf=%s, searches=%d, %.0fms) — %s",
-        match_str, result["confidence"], result["searches"], elapsed_ms,
-        result["reasoning"][:120] if result["reasoning"] else "",
+        match_str, result["confidence"], searches, elapsed_ms,
+        result["reasoning"][:120],
     )
-
-
-# ------------------------------------------------------------------ #
-#  Парсинг JSON из ответа агента
-# ------------------------------------------------------------------ #
-
-def _parse_final(text: str, searches: int) -> dict:
-    """Извлечь JSON из финального ответа.
-
-    Устойчив к обрезанным ответам: пытается достроить незакрытый JSON.
-    """
-    raw = text.strip()
-    start = raw.find("{")
-    if start == -1:
-        logger.warning("Нет JSON в ответе: %s", raw[:200])
-        return _fallback_parse(raw, searches)
-
-    fragment = raw[start:]
-
-    # 1. Попытка парсинга как есть (полный JSON)
-    end = fragment.rfind("}")
-    if end != -1:
-        try:
-            data = json.loads(fragment[: end + 1])
-            return _build_result(data, raw, searches)
-        except json.JSONDecodeError:
-            pass
-
-    # 2. JSON обрезан — пробуем достроить
-    repaired = fragment.rstrip()
-    if repaired.count('"') % 2 == 1:
-        repaired += '"'
-    if not repaired.endswith("}"):
-        repaired += "}"
-
-    try:
-        data = json.loads(repaired)
-        logger.debug("  JSON repaired successfully")
-        return _build_result(data, raw, searches)
-    except json.JSONDecodeError:
-        pass
-
-    # 3. Regex-фолбэк
-    return _fallback_parse(raw, searches)
-
-
-def _build_result(data: dict, raw: str, searches: int) -> dict:
-    return {
-        "match": bool(data.get("match", False)),
-        "confidence": data.get("confidence", "medium"),
-        "reasoning": data.get("reasoning", ""),
-        "searches": searches,
-        "raw_response": raw,
-    }
-
-
-def _fallback_parse(raw: str, searches: int) -> dict:
-    """Regex-фолбэк для извлечения match/confidence из сломанного JSON."""
-    match_val = None
-    m = re.search(r'"match"\s*:\s*(true|false)', raw, re.IGNORECASE)
-    if m:
-        match_val = m.group(1).lower() == "true"
-
-    conf = "medium"
-    m = re.search(r'"confidence"\s*:\s*"(high|medium|low)"', raw, re.IGNORECASE)
-    if m:
-        conf = m.group(1).lower()
-
-    if match_val is not None:
-        logger.debug("  Fallback parse OK: match=%s, confidence=%s", match_val, conf)
-        return {
-            "match": match_val,
-            "confidence": conf,
-            "reasoning": f"PARTIAL_PARSE: {raw[:200]}",
-            "searches": searches,
-            "raw_response": raw,
-        }
-
-    logger.warning("Не удалось распарсить ответ: %s", raw[:200])
-    return {
-        "match": False,
-        "confidence": "low",
-        "reasoning": f"PARSE_ERROR: {raw[:200]}",
-        "searches": searches,
-        "raw_response": raw,
-    }
+    return result
 
 
 # ------------------------------------------------------------------ #
@@ -722,7 +669,7 @@ def main() -> None:
 
     # Разметка
     logger.info("Модель: %s, host: %s", args.model, args.host)
-    graph = create_langgraph_agent(args.model, args.host)
+    graph = create_agent(args.model, args.host)
     candidates = label_candidates(candidates, graph, output_path)
     candidates.to_parquet(output_path)
 
