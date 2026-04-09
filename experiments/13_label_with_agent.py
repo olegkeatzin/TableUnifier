@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import re
 import time
 from pathlib import Path
 from typing import Literal
@@ -419,6 +420,44 @@ def _extract_trace(messages: list) -> tuple[list[dict], int]:
     return steps, searches
 
 
+def _parse_text_tool_call(text: str) -> dict | None:
+    """Извлечь результат из текстового <call:submit_answer>{...}</call:submit_answer>.
+
+    Некоторые модели (gemma4) генерируют tool calls как текст, а не через
+    нативный tool calling API. Парсим JSON-подобное содержимое.
+    """
+    # Паттерн: <call:submit_answer>{...}</call:submit_answer>
+    m = re.search(r"<call:submit_answer>\s*(\{.*?\})\s*</call:submit_answer>", text, re.DOTALL)
+    if not m:
+        return None
+
+    raw_json = m.group(1)
+    # Модель может генерировать невалидный JSON (без кавычек у ключей) — фиксим
+    # confidence: "high" → "confidence": "high"
+    fixed = re.sub(r'(\w+)\s*:', r'"\1":', raw_json)
+    try:
+        data = json.loads(fixed)
+    except json.JSONDecodeError:
+        return None
+
+    # Валидация полей
+    match_val = data.get("match")
+    if isinstance(match_val, str):
+        match_val = match_val.lower() == "true"
+    elif not isinstance(match_val, bool):
+        return None
+
+    confidence = data.get("confidence", "low")
+    if confidence not in ("high", "medium", "low"):
+        confidence = "low"
+
+    return {
+        "match": match_val,
+        "confidence": confidence,
+        "reasoning": str(data.get("reasoning", "")),
+    }
+
+
 def label_one_pair(
     graph,
     pair_idx: int,
@@ -480,20 +519,32 @@ def label_one_pair(
             "raw_response": json.dumps(_last_answer, ensure_ascii=False),
         }
     else:
-        # Фолбэк: агент не вызвал submit_answer
+        # Фолбэк: агент не сделал нативный tool call — парсим текст
         raw = ""
         for msg in reversed(messages):
             if msg.type == "ai" and msg.content:
                 raw = str(msg.content)
                 break
-        logger.warning("submit_answer не вызван, raw: %s", raw[:200])
-        result = {
-            "match": False,
-            "confidence": "low",
-            "reasoning": f"NO_SUBMIT: {raw[:200]}",
-            "searches": searches,
-            "raw_response": raw,
-        }
+
+        parsed = _parse_text_tool_call(raw)
+        if parsed is not None:
+            logger.debug("  Parsed text tool call: %s", parsed)
+            result = {
+                "match": parsed["match"],
+                "confidence": parsed["confidence"],
+                "reasoning": parsed["reasoning"],
+                "searches": searches,
+                "raw_response": json.dumps(parsed, ensure_ascii=False),
+            }
+        else:
+            logger.warning("submit_answer не вызван и не найден в тексте, raw: %s", raw[:200])
+            result = {
+                "match": False,
+                "confidence": "low",
+                "reasoning": f"NO_SUBMIT: {raw[:200]}",
+                "searches": searches,
+                "raw_response": raw,
+            }
 
     steps.append({"type": "final", "output": result["raw_response"]})
 
