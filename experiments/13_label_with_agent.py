@@ -335,9 +335,23 @@ NO MATCH:
 #  Агентный цикл (LangGraph)
 # ------------------------------------------------------------------ #
 
+class _ChatOllamaFC(ChatOllama):
+    """ChatOllama, принудительно использующий tool calling для structured output.
+
+    По умолчанию ChatOllama.with_structured_output() использует JSON parsing —
+    модель должна вернуть чистый JSON. Локальные модели (gemma4) часто возвращают
+    пустой текст или невалидный JSON. Tool calling надёжнее: LangGraph отправляет
+    схему как tool, модель делает tool call с заполненными полями.
+    """
+
+    def with_structured_output(self, schema, **kwargs):
+        kwargs.setdefault("method", "function_calling")
+        return super().with_structured_output(schema, **kwargs)
+
+
 def create_agent(model: str, host: str):
     """Создать LangGraph ReAct-агента с web_search и structured output."""
-    llm = ChatOllama(
+    llm = _ChatOllamaFC(
         model=model,
         base_url=host,
         num_predict=1024,
