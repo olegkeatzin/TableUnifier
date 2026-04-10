@@ -324,7 +324,7 @@ NO MATCH:
   → NO MATCH: A описывает характеристику (Н20), B — конкретный К10-17В. Разные уровни спецификации.
 
 === ИНСТРУКЦИИ ===
-- Сначала выдели ключевые параметры из обеих записей: тип, серия, номинал, допуск, напряжение, ТУ.
+- Будь КРАТКИМ: выдели параметры, сравни, дай ответ. Без подробных пояснений.
 - Сравни параметры поэлементно. Если ЛЮБОЙ параметр отличается — NO MATCH.
 - Используй web_search только если не можешь расшифровать обозначение компонента.
 - При сомнении — NO MATCH с confidence="medium".
@@ -354,7 +354,7 @@ def create_agent(model: str, host: str):
     llm = _ChatOllamaFC(
         model=model,
         base_url=host,
-        num_predict=1024,
+        num_predict=2048,
         temperature=0,
     )
     search = DuckDuckGoSearchRun(max_results=3)
@@ -455,7 +455,10 @@ def label_one_pair(
     steps, searches = _extract_trace(messages)
 
     # structured_response заполняется LangGraph через response_format
-    answer: MatchResult = response["structured_response"]
+    answer: MatchResult | None = response.get("structured_response")
+    if answer is None:
+        raise RuntimeError("Модель не вернула structured_response (tool call не состоялся)")
+
     result = {
         "match": answer.match,
         "confidence": answer.confidence,
