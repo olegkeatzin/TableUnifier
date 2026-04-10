@@ -335,23 +335,9 @@ NO MATCH:
 #  Агентный цикл (LangGraph)
 # ------------------------------------------------------------------ #
 
-class _ChatOllamaFC(ChatOllama):
-    """ChatOllama, принудительно использующий tool calling для structured output.
-
-    По умолчанию ChatOllama.with_structured_output() использует JSON parsing —
-    модель должна вернуть чистый JSON. Локальные модели (gemma4) часто возвращают
-    пустой текст или невалидный JSON. Tool calling надёжнее: LangGraph отправляет
-    схему как tool, модель делает tool call с заполненными полями.
-    """
-
-    def with_structured_output(self, schema, **kwargs):
-        kwargs.setdefault("method", "function_calling")
-        return super().with_structured_output(schema, **kwargs)
-
-
 def create_agent(model: str, host: str):
-    """Создать LangGraph ReAct-агента с web_search и structured output."""
-    llm = _ChatOllamaFC(
+    """Создать LangGraph ReAct-агента с web_search."""
+    llm = ChatOllama(
         model=model,
         base_url=host,
         num_predict=2048,
@@ -369,9 +355,27 @@ def create_agent(model: str, host: str):
         model=llm,
         tools=[search],
         prompt=SYSTEM_PROMPT,
-        response_format=MatchResult,
         name="component_matcher",
     )
+
+
+def _extract_structured(model: str, host: str, messages: list) -> MatchResult:
+    """Извлечь structured ответ из переписки агента.
+
+    Отдельный вызов с Ollama format= — constrained decoding на уровне токенов.
+    Гарантирует валидный JSON, соответствующий схеме MatchResult.
+    """
+    llm = ChatOllama(
+        model=model,
+        base_url=host,
+        num_predict=256,
+        temperature=0,
+        format=MatchResult.model_json_schema(),
+    )
+    response = llm.invoke(
+        messages + [HumanMessage(content="Верни итоговый результат в формате JSON.")],
+    )
+    return MatchResult.model_validate_json(response.content)
 
 
 def _extract_trace(messages: list) -> tuple[list[dict], int]:
@@ -390,8 +394,6 @@ def _extract_trace(messages: list) -> tuple[list[dict], int]:
                     })
                     if tc["name"] == "web_search":
                         searches += 1
-                    elif tc["name"] == "MatchResult":
-                        steps[-1]["type"] = "submit"
             elif msg.content:
                 logger.debug("  AI: %s", str(msg.content)[:500])
                 steps.append({"type": "ai", "output": str(msg.content)})
@@ -408,6 +410,8 @@ def _extract_trace(messages: list) -> tuple[list[dict], int]:
 
 def label_one_pair(
     graph,
+    model: str,
+    host: str,
     pair_idx: int,
     spec_text: str,
     nom_text: str,
@@ -454,10 +458,8 @@ def label_one_pair(
     messages = response["messages"]
     steps, searches = _extract_trace(messages)
 
-    # structured_response заполняется LangGraph через response_format
-    answer: MatchResult | None = response.get("structured_response")
-    if answer is None:
-        raise RuntimeError("Модель не вернула structured_response (tool call не состоялся)")
+    # Отдельный вызов с constrained decoding — гарантирует валидный JSON
+    answer = _extract_structured(model, host, messages)
 
     result = {
         "match": answer.match,
@@ -498,6 +500,8 @@ def label_one_pair(
 def label_candidates(
     candidates: pd.DataFrame,
     graph,
+    model: str,
+    host: str,
     output_path: Path = OUTPUT_PATH,
 ) -> pd.DataFrame:
     """Разметить кандидатов через ReAct-агента.
@@ -531,7 +535,7 @@ def label_candidates(
 
         try:
             result = label_one_pair(
-                graph, idx,
+                graph, model, host, idx,
                 row["spec_text"], row["nom_text"], row["cosine_sim"],
             )
             candidates.at[idx, "label"] = 1 if result["match"] else 0
@@ -764,7 +768,7 @@ def main() -> None:
     # Разметка
     logger.info("Модель: %s, host: %s", args.model, args.host)
     graph = create_agent(args.model, args.host)
-    candidates = label_candidates(candidates, graph, output_path)
+    candidates = label_candidates(candidates, graph, args.model, args.host, output_path)
     candidates.to_parquet(output_path)
 
     # Статистика
