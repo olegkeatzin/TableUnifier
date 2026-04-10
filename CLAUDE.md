@@ -69,9 +69,13 @@ CSV Tables
 
 **EntityResolutionGNN** (`models/entity_resolution.py`): Гетерогенный GNN с `L` слоями `EdgeMeanConv`. Узлы: `row` (312-dim CLS) и `token` (312-dim vocab). Рёбра `token→row` несут column embeddings (4096-dim) как атрибуты. Финальные row embeddings используются для поиска дубликатов через косинусное сходство.
 
+**EntityResolutionGAT** (`models/entity_resolution.py`): Альтернативная архитектура — то же, но использует GATv2Conv вместо EdgeMeanConv. Эксперименты 09, 11 тренируют эту модель.
+
 **EdgeMeanConv** (`models/gnn_layer.py`): Message passing с mean агрегацией, использует edge features (token→row и опционально обратное направление).
 
 **GATLayer** (`models/gat_layer.py`): GATv2Conv с edge features и multi-head attention. Использует GraphNorm вместо LayerNorm. Поддерживает bidirectional (token→row + row→token).
+
+**Losses** (`models/losses.py`): TripletLoss с полу-жёстким майнингом (`mine_semi_hard`) + NT-Xent (InfoNCE) loss. ER trainer поддерживает оба.
 
 ### Key Design Decisions
 
@@ -117,3 +121,12 @@ All paths relative to `src/table_unifier/`:
 | `evaluation/clustering.py` | Threshold sweep (F1), ROC-AUC, HDBSCAN clustering |
 | `training/schema_trainer.py` | Обучение SchemaProjector |
 | `training/er_trainer.py` | Обучение ER модели (single/multi-dataset) |
+
+### Testing
+
+Тесты в `tests/` не требуют Ollama и работают на синтетических данных. Общие фикстуры (`conftest.py`):
+- `table_a`, `table_b`, `labels_df` — мини-таблицы (3 строки) для unit-тестов
+- `column_embeddings` — случайные 64-dim эмбеддинги столбцов
+- `small_hetero_data` — минимальный HeteroData граф (6 row, 10 token, 20 edges) с маленькими размерностями (row_dim=32, token_dim=32, col_dim=64) — используется в тестах моделей
+
+При создании новых тестов модели используй `small_hetero_data` и передавай соответствующие размерности (32/32/64), а не дефолтные из конфига (312/312/4096).

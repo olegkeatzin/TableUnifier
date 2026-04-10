@@ -26,7 +26,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import re
 import time
 from pathlib import Path
 from typing import Literal
@@ -260,7 +259,7 @@ def _write_trace(record: dict) -> None:
 
 
 # ------------------------------------------------------------------ #
-#  Submit answer tool (вместо structured output)
+#  Structured output schema
 # ------------------------------------------------------------------ #
 
 class MatchResult(BaseModel):
@@ -268,21 +267,6 @@ class MatchResult(BaseModel):
     match: bool = Field(description="true если записи описывают один и тот же товар")
     confidence: Literal["high", "medium", "low"] = Field(description="уверенность в ответе")
     reasoning: str = Field(description="одно предложение с обоснованием")
-
-
-# Хранилище последнего ответа — заполняется при вызове submit_answer tool
-_last_answer: dict | None = None
-
-
-def _submit_answer(match: bool, confidence: str, reasoning: str) -> str:
-    """Зафиксировать финальный ответ. Вызови этот tool ОДИН раз после анализа."""
-    global _last_answer
-    _last_answer = {
-        "match": match,
-        "confidence": confidence,
-        "reasoning": reasoning,
-    }
-    return "Ответ принят."
 
 
 SYSTEM_PROMPT = """\
@@ -344,7 +328,6 @@ NO MATCH:
 - Сравни параметры поэлементно. Если ЛЮБОЙ параметр отличается — NO MATCH.
 - Используй web_search только если не можешь расшифровать обозначение компонента.
 - При сомнении — NO MATCH с confidence="medium".
-- ОБЯЗАТЕЛЬНО вызови submit_answer с финальным результатом.
 """
 
 
@@ -353,9 +336,7 @@ NO MATCH:
 # ------------------------------------------------------------------ #
 
 def create_agent(model: str, host: str):
-    """Создать LangGraph ReAct-агента с web_search и submit_answer tools."""
-    from langchain_core.tools import StructuredTool
-
+    """Создать LangGraph ReAct-агента с web_search и structured output."""
     llm = ChatOllama(
         model=model,
         base_url=host,
@@ -370,20 +351,11 @@ def create_agent(model: str, host: str):
         "характеристиках. Input: поисковый запрос на русском или английском."
     )
 
-    submit_tool = StructuredTool.from_function(
-        func=_submit_answer,
-        name="submit_answer",
-        description=(
-            "Зафиксировать финальный ответ после анализа пары. "
-            "ОБЯЗАТЕЛЬНО вызови этот tool ровно один раз в конце."
-        ),
-        args_schema=MatchResult,
-    )
-
     return create_react_agent(
         model=llm,
-        tools=[search, submit_tool],
+        tools=[search],
         prompt=SYSTEM_PROMPT,
+        response_format=MatchResult,
         name="component_matcher",
     )
 
@@ -404,7 +376,7 @@ def _extract_trace(messages: list) -> tuple[list[dict], int]:
                     })
                     if tc["name"] == "web_search":
                         searches += 1
-                    elif tc["name"] == "submit_answer":
+                    elif tc["name"] == "MatchResult":
                         steps[-1]["type"] = "submit"
             elif msg.content:
                 logger.debug("  AI: %s", str(msg.content)[:500])
@@ -418,44 +390,6 @@ def _extract_trace(messages: list) -> tuple[list[dict], int]:
                 "output_preview": output_str[:1000],
             })
     return steps, searches
-
-
-def _parse_text_tool_call(text: str) -> dict | None:
-    """Извлечь результат из текстового <call:submit_answer>{...}</call:submit_answer>.
-
-    Некоторые модели (gemma4) генерируют tool calls как текст, а не через
-    нативный tool calling API. Парсим JSON-подобное содержимое.
-    """
-    # Паттерн: <call:submit_answer>{...}</call:submit_answer>
-    m = re.search(r"<call:submit_answer>\s*(\{.*?\})\s*</call:submit_answer>", text, re.DOTALL)
-    if not m:
-        return None
-
-    raw_json = m.group(1)
-    # Модель может генерировать невалидный JSON (без кавычек у ключей) — фиксим
-    # confidence: "high" → "confidence": "high"
-    fixed = re.sub(r'(\w+)\s*:', r'"\1":', raw_json)
-    try:
-        data = json.loads(fixed)
-    except json.JSONDecodeError:
-        return None
-
-    # Валидация полей
-    match_val = data.get("match")
-    if isinstance(match_val, str):
-        match_val = match_val.lower() == "true"
-    elif not isinstance(match_val, bool):
-        return None
-
-    confidence = data.get("confidence", "low")
-    if confidence not in ("high", "medium", "low"):
-        confidence = "low"
-
-    return {
-        "match": match_val,
-        "confidence": confidence,
-        "reasoning": str(data.get("reasoning", "")),
-    }
 
 
 def label_one_pair(
@@ -474,7 +408,7 @@ def label_one_pair(
     question = (
         f'Запись A: "{spec_text}"\n'
         f'Запись B: "{nom_text}"\n'
-        f"Проанализируй и вызови submit_answer с результатом."
+        f"Проанализируй и дай финальный ответ."
     )
 
     logger.debug("=" * 80)
@@ -482,15 +416,11 @@ def label_one_pair(
     logger.debug("  SPEC: %s", spec_text)
     logger.debug("  NOM:  %s", nom_text)
 
-    global _last_answer
-    _last_answer = None
-
     t_start = time.monotonic()
     last_err = None
     response = None
     for attempt in range(3):
         try:
-            _last_answer = None  # сбросить перед каждой попыткой
             response = graph.invoke(
                 {"messages": [HumanMessage(content=question)]},
                 config={"recursion_limit": MAX_AGENT_ITERATIONS * 2 + 1},
@@ -510,41 +440,15 @@ def label_one_pair(
     messages = response["messages"]
     steps, searches = _extract_trace(messages)
 
-    if _last_answer is not None:
-        result = {
-            "match": _last_answer["match"],
-            "confidence": _last_answer["confidence"],
-            "reasoning": _last_answer["reasoning"],
-            "searches": searches,
-            "raw_response": json.dumps(_last_answer, ensure_ascii=False),
-        }
-    else:
-        # Фолбэк: агент не сделал нативный tool call — парсим текст
-        raw = ""
-        for msg in reversed(messages):
-            if msg.type == "ai" and msg.content:
-                raw = str(msg.content)
-                break
-
-        parsed = _parse_text_tool_call(raw)
-        if parsed is not None:
-            logger.debug("  Parsed text tool call: %s", parsed)
-            result = {
-                "match": parsed["match"],
-                "confidence": parsed["confidence"],
-                "reasoning": parsed["reasoning"],
-                "searches": searches,
-                "raw_response": json.dumps(parsed, ensure_ascii=False),
-            }
-        else:
-            logger.warning("submit_answer не вызван и не найден в тексте, raw: %s", raw[:200])
-            result = {
-                "match": False,
-                "confidence": "low",
-                "reasoning": f"NO_SUBMIT: {raw[:200]}",
-                "searches": searches,
-                "raw_response": raw,
-            }
+    # structured_response заполняется LangGraph через response_format
+    answer: MatchResult = response["structured_response"]
+    result = {
+        "match": answer.match,
+        "confidence": answer.confidence,
+        "reasoning": answer.reasoning,
+        "searches": searches,
+        "raw_response": answer.model_dump_json(),
+    }
 
     steps.append({"type": "final", "output": result["raw_response"]})
 
