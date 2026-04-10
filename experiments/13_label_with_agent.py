@@ -362,20 +362,32 @@ def create_agent(model: str, host: str):
 def _extract_structured(model: str, host: str, messages: list) -> MatchResult:
     """Извлечь structured ответ из переписки агента.
 
-    Отдельный вызов с Ollama format= — constrained decoding на уровне токенов.
-    Гарантирует валидный JSON, соответствующий схеме MatchResult.
+    Отдельный вызов через ollama напрямую с format= (constrained decoding).
+    Ollama форсирует валидный JSON на уровне грамматики токенов.
     """
-    llm = ChatOllama(
+    import ollama
+
+    # Собрать текст последнего ответа агента
+    last_ai_text = ""
+    for msg in reversed(messages):
+        if msg.type == "ai" and msg.content:
+            last_ai_text = str(msg.content)
+            break
+
+    client = ollama.Client(host=host)
+    response = client.chat(
         model=model,
-        base_url=host,
-        num_predict=256,
-        temperature=0,
+        messages=[
+            {"role": "user", "content": (
+                f"На основе анализа:\n{last_ai_text}\n\n"
+                "Верни JSON с полями: match (bool), confidence (high/medium/low), "
+                "reasoning (одно предложение)."
+            )},
+        ],
         format=MatchResult.model_json_schema(),
+        options={"num_predict": 256, "temperature": 0},
     )
-    response = llm.invoke(
-        messages + [HumanMessage(content="Верни итоговый результат в формате JSON.")],
-    )
-    return MatchResult.model_validate_json(response.content)
+    return MatchResult.model_validate_json(response.message.content)
 
 
 def _extract_trace(messages: list) -> tuple[list[dict], int]:
