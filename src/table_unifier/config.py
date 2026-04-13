@@ -48,6 +48,7 @@ class EntityResolutionConfig:
     attention_dropout: float = 0.1
     temperature: float = 0.1
     warmup_ratio: float = 0.1
+    use_input_projection: bool = True
 
 
 @dataclass

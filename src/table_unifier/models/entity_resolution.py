@@ -131,26 +131,41 @@ class EntityResolutionGAT(nn.Module):
         dropout: float = 0.1,
         attention_dropout: float = 0.1,
         bidirectional: bool = False,
+        use_input_projection: bool = True,
     ):
         super().__init__()
+        self.use_input_projection = use_input_projection
 
-        # Проекционные слои (идентичны EntityResolutionGNN)
-        self.row_proj = nn.Sequential(
-            nn.Linear(row_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-        )
-        self.token_proj = nn.Sequential(
-            nn.Linear(token_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-        )
-        self.edge_proj = nn.Sequential(
-            nn.Linear(col_dim, edge_dim),
-            nn.GELU(),
-        )
+        if use_input_projection:
+            # Проекционные слои (идентичны EntityResolutionGNN)
+            self.row_proj = nn.Sequential(
+                nn.Linear(row_dim, hidden_dim),
+                nn.LayerNorm(hidden_dim),
+                nn.GELU(),
+                nn.Dropout(dropout),
+            )
+            self.token_proj = nn.Sequential(
+                nn.Linear(token_dim, hidden_dim),
+                nn.LayerNorm(hidden_dim),
+                nn.GELU(),
+                nn.Dropout(dropout),
+            )
+            self.edge_proj = nn.Sequential(
+                nn.Linear(col_dim, edge_dim),
+                nn.GELU(),
+            )
+        else:
+            # Без входных проекций — размерности должны совпадать.
+            # Используется с MRL-обрезанным qwen3 (col_dim == hidden_dim == edge_dim).
+            assert row_dim == hidden_dim, (
+                f"use_input_projection=False требует row_dim ({row_dim}) == hidden_dim ({hidden_dim})"
+            )
+            assert token_dim == hidden_dim, (
+                f"use_input_projection=False требует token_dim ({token_dim}) == hidden_dim ({hidden_dim})"
+            )
+            assert col_dim == edge_dim, (
+                f"use_input_projection=False требует col_dim ({col_dim}) == edge_dim ({edge_dim})"
+            )
 
         # GATv2 слои
         self.gnn_layers = nn.ModuleList([
@@ -172,10 +187,15 @@ class EntityResolutionGAT(nn.Module):
 
     def forward(self, data: HeteroData) -> torch.Tensor:
         """Returns: L2-нормализованные эмбеддинги строк [N_rows, output_dim]."""
-        row_x = self.row_proj(data["row"].x)
-        token_x = self.token_proj(data["token"].x)
+        if self.use_input_projection:
+            row_x = self.row_proj(data["row"].x)
+            token_x = self.token_proj(data["token"].x)
+            col_emb_proj = self.edge_proj(data.col_embeddings)
+        else:
+            row_x = data["row"].x
+            token_x = data["token"].x
+            col_emb_proj = data.col_embeddings
 
-        col_emb_proj = self.edge_proj(data.col_embeddings)
         t2r_col_idx = data["token", "in_row", "row"].edge_col_idx.long()
         r2t_col_idx = data["row", "has_token", "token"].edge_col_idx.long()
 

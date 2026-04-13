@@ -34,13 +34,19 @@ def build_graph(
     precomputed_row_embeddings_b: np.ndarray | None = None,
     max_token_df: float = 0.3,
     max_tokens_per_cell: int = 16,
+    min_token_count: int = 1,
 ) -> tuple[HeteroData, dict[str, int], dict[str, int]]:
     """Построить HeteroData-граф из двух таблиц.
 
-    Токены фильтруются в два этапа:
-    1. IDF-фильтрация: удаляются токены, встречающиеся в >max_token_df доле строк
-       (стоп-слова, пунктуация, артикли) — они не помогают различать сущности.
-    2. Если после фильтрации ячейка даёт >max_tokens_per_cell токенов,
+    Токены фильтруются в три этапа:
+    1. IDF-фильтрация (верхний хвост): удаляются токены, встречающиеся в
+       >max_token_df доле строк (стоп-слова, пунктуация) — они не помогают
+       различать сущности.
+    2. Min-degree фильтрация (нижний хвост): удаляются токены, встречающиеся
+       в <min_token_count строках. Singleton-токены (degree=1) бесполезны для
+       message passing — их сообщение идёт в одну строку и не помогает
+       сравнивать её с другими.
+    3. Если после фильтрации ячейка даёт >max_tokens_per_cell токенов,
        берётся случайная выборка (не первые N, чтобы охватить всю ячейку).
 
     Args:
@@ -51,6 +57,9 @@ def build_graph(
             чаще, считаются стоп-словами и удаляются. По умолч. 0.3 (30% строк).
         max_tokens_per_cell: лимит токенов на ячейку после IDF-фильтрации.
             При превышении — случайная выборка. По умолч. 16.
+        min_token_count: минимальное число строк, в которых должен встречаться
+            токен. По умолч. 1 (без фильтрации). Установить ≥2 чтобы убрать
+            singleton-токены (уникальные ID, опечатки).
 
     Returns:
         (data, id_to_global_a, id_to_global_b)
@@ -150,6 +159,19 @@ def build_graph(
             len(stopword_nodes), len(token_ids_list), max_token_df * 100,
         )
 
+    # ---- 3b'. Min-degree фильтрация: удаляем singleton-токены ---- #
+    if min_token_count > 1:
+        singleton_nodes = {
+            node for node, rows in token_row_sets.items()
+            if len(rows) < min_token_count and node not in stopword_nodes
+        }
+        if singleton_nodes:
+            logger.info(
+                "Min-degree фильтрация: удалено %d/%d токенов (df < %d строк)",
+                len(singleton_nodes), len(token_ids_list), min_token_count,
+            )
+        stopword_nodes = stopword_nodes | singleton_nodes
+
     # ---- 3c. Построение финальных рёбер с лимитом per-cell ---- #
     # Группируем по (row_idx, col_idx), фильтруем стоп-токены,
     # при превышении лимита берём случайную выборку (не первые N).
@@ -237,6 +259,7 @@ def build_unified_graph_from_datasets(
     token_embedder: "TokenEmbedder",
     max_token_df: float = 0.3,
     max_tokens_per_cell: int = 16,
+    min_token_count: int = 1,
 ) -> tuple[HeteroData, dict[str, dict], torch.Tensor]:
     """Построить один граф из нескольких датасетов с глобальным IDF.
 
@@ -361,13 +384,29 @@ def build_unified_graph_from_datasets(
         node for node, rows in token_row_sets.items()
         if len(rows) > idf_threshold
     }
-    # Считаем рёбра, удалённые фильтрацией
+    n_tokens_removed_idf = len(stopword_nodes)
     n_edges_removed_idf = sum(1 for tn, _, _ in raw_edges if tn in stopword_nodes)
     logger.info("Глобальная IDF: удалено %d/%d токенов (df > %.1f%% из %d строк), "
                 "рёбер до=%d, удалено=%d (%.1f%%)",
-                len(stopword_nodes), n_raw_tokens, max_token_df * 100, n_rows,
+                n_tokens_removed_idf, n_raw_tokens, max_token_df * 100, n_rows,
                 n_raw_edges, n_edges_removed_idf,
                 100 * n_edges_removed_idf / n_raw_edges if n_raw_edges else 0)
+
+    # Min-degree фильтрация: режем нижний хвост (singleton-токены)
+    n_tokens_removed_mindeg = 0
+    n_edges_removed_mindeg = 0
+    if min_token_count > 1:
+        singleton_nodes = {
+            node for node, rows in token_row_sets.items()
+            if len(rows) < min_token_count and node not in stopword_nodes
+        }
+        n_tokens_removed_mindeg = len(singleton_nodes)
+        n_edges_removed_mindeg = sum(1 for tn, _, _ in raw_edges if tn in singleton_nodes)
+        logger.info("Min-degree: удалено %d/%d токенов (df < %d), рёбер удалено=%d (%.1f%%)",
+                    n_tokens_removed_mindeg, n_raw_tokens, min_token_count,
+                    n_edges_removed_mindeg,
+                    100 * n_edges_removed_mindeg / n_raw_edges if n_raw_edges else 0)
+        stopword_nodes = stopword_nodes | singleton_nodes
 
     # Финальные рёбра с лимитом per-cell
     cell_tokens: dict[tuple[int, int], list[int]] = defaultdict(list)
@@ -423,21 +462,25 @@ def build_unified_graph_from_datasets(
 
     n_final_edges = t2r_edge_index.shape[1]
     n_edges_after_idf = n_raw_edges - n_edges_removed_idf
-    n_edges_removed_cell_limit = n_edges_after_idf - n_final_edges
+    n_edges_after_filters = n_edges_after_idf - n_edges_removed_mindeg
+    n_edges_removed_cell_limit = n_edges_after_filters - n_final_edges
 
-    logger.info("Unified graph: rows=%d, tokens=%d, edges=%d (raw=%d → IDF=%d → final=%d), "
-                "labeled_pairs=%d",
+    logger.info("Unified graph: rows=%d, tokens=%d, edges=%d "
+                "(raw=%d → after IDF=%d → after min-deg=%d → final=%d), labeled_pairs=%d",
                 data["row"].x.shape[0], data["token"].x.shape[0],
-                n_final_edges, n_raw_edges, n_edges_after_idf, n_final_edges,
-                len(labeled_tensor))
+                n_final_edges, n_raw_edges, n_edges_after_idf, n_edges_after_filters,
+                n_final_edges, len(labeled_tensor))
 
     # Сохраняем статистику фильтрации как атрибуты графа
     data.filter_stats = {
         "raw_tokens": n_raw_tokens,
         "raw_edges": n_raw_edges,
         "idf_threshold": max_token_df,
-        "tokens_removed_idf": len(stopword_nodes),
+        "min_token_count": min_token_count,
+        "tokens_removed_idf": n_tokens_removed_idf,
+        "tokens_removed_mindeg": n_tokens_removed_mindeg,
         "edges_removed_idf": n_edges_removed_idf,
+        "edges_removed_mindeg": n_edges_removed_mindeg,
         "edges_after_idf": n_edges_after_idf,
         "edges_removed_cell_limit": n_edges_removed_cell_limit,
         "final_tokens": len(token_ids_list),

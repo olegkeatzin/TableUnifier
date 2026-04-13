@@ -372,6 +372,7 @@ def train_entity_resolution_minibatch(
             num_gnn_layers=config.num_gnn_layers, num_heads=config.num_heads,
             dropout=config.dropout, attention_dropout=config.attention_dropout,
             bidirectional=config.bidirectional,
+            use_input_projection=config.use_input_projection,
         ).to(device)
     else:
         model = _build_model(config, device)
@@ -617,6 +618,7 @@ def train_entity_resolution_bce(
             num_gnn_layers=config.num_gnn_layers, num_heads=config.num_heads,
             dropout=config.dropout, attention_dropout=config.attention_dropout,
             bidirectional=config.bidirectional,
+            use_input_projection=config.use_input_projection,
         )
     else:
         backbone = EntityResolutionGNN(
