@@ -64,6 +64,8 @@ def main() -> None:
                         help="bce → exp 11-style classification, ntxent → exp 09-style metric")
     parser.add_argument("--max-epochs", type=int, default=500)
     parser.add_argument("--patience", type=int, default=30)
+    parser.add_argument("--no-early-stopping", action="store_true",
+                        help="Отключить early stopping — учить ровно --max-epochs эпох")
     parser.add_argument("--data-dir", default="data")
     parser.add_argument("--output-dir", default="output")
     parser.add_argument("--device", default=None)
@@ -136,7 +138,9 @@ def main() -> None:
                 args.loss, er_config.hidden_dim, er_config.num_gnn_layers, er_config.num_heads,
                 er_config.dropout, er_config.bidirectional, er_config.lr, er_config.weight_decay)
 
-    early_stop = EarlyStopping(patience=args.patience)
+    epoch_callback = None if args.no_early_stopping else EarlyStopping(patience=args.patience)
+    if args.no_early_stopping:
+        logger.info("Early stopping отключён — будет %d эпох", args.max_epochs)
 
     if args.loss == "bce":
         model, history = train_entity_resolution_bce(
@@ -146,7 +150,7 @@ def main() -> None:
             config=er_config,
             device=device,
             save_path=save_path,
-            epoch_callback=early_stop,
+            epoch_callback=epoch_callback,
             model_class="gat",
         )
     else:
@@ -157,7 +161,7 @@ def main() -> None:
             config=er_config,
             device=device,
             save_path=save_path,
-            epoch_callback=early_stop,
+            epoch_callback=epoch_callback,
             model_class="gat",
         )
 
