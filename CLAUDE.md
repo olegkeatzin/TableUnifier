@@ -40,6 +40,8 @@ uv run python experiments/10_evaluate.py
 uv run python experiments/11_train_gat_bce.py
 uv run python experiments/12_label_real_data.py
 uv run python experiments/13_label_with_agent.py   # требует gemma4:26b + интернет
+uv run python experiments/14_build_unified_graph_mrl.py
+uv run python experiments/14_train_gat_mrl.py
 ```
 
 ### Experiment Tracking
@@ -48,7 +50,7 @@ uv run mlflow ui --backend-store-uri sqlite:///mlflow.db  # View results at http
 ```
 
 ### External Services Required
-- **Ollama** must be running locally for column embedding generation (`OllamaConfig.host = "http://localhost:11434"`)
+- **Ollama** must be reachable at `OllamaConfig.host` for column embedding generation. В этом проекте Ollama/GPU живёт на удалённом nvidia-server — не запускай локально.
 - Default LLM: `qwen3.5:9b`, default embedding model: `qwen3-embedding:8b`
 
 ## Architecture
