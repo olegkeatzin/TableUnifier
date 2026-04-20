@@ -29,9 +29,12 @@ Pipeline:
     python -m experiments.15_test_on_real_labels --model output/v3_gat_model.pt
     # v3 BCE
     python -m experiments.15_test_on_real_labels --model output/v3_gat_bce_model.pt --bce
-    # v14 MRL (требует --mrl + target_dim)
+    # v14 MRL NT-Xent (требует --mrl + --no-input-projection)
     python -m experiments.15_test_on_real_labels \
-        --model output/v14_mrl_gat_bce_model.pt --bce --mrl --target-dim 312
+        --model output/v14_mrl_gat_model.pt --mrl --target-dim 312 --no-input-projection
+    # v14 MRL BCE
+    python -m experiments.15_test_on_real_labels \
+        --model output/v14_mrl_gat_bce_model.pt --bce --mrl --target-dim 312 --no-input-projection
 """
 
 from __future__ import annotations
