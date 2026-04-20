@@ -34,6 +34,7 @@ from table_unifier.dataset.embedding_generation import (
 )
 from table_unifier.dataset.schema_augmentation import augment_schema, apply_schema_injection
 from table_unifier.dataset.value_corruption import corrupt_dataframe
+from table_unifier.paths import columns_dir, rows_dir
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s | %(name)s | %(message)s")
 logger = logging.getLogger(__name__)
@@ -217,6 +218,20 @@ def main() -> None:
                         help="Генерировать синтетический датасет (нужен Ollama)")
     parser.add_argument("--embeddings", action="store_true",
                         help="Генерировать эмбеддинги (столбцы, строки, токены)")
+    parser.add_argument("--model-tag", default=None,
+                        help="Namespace для data/embeddings/rows/<tag>/ "
+                             "(по умолч. из config.entity_resolution.token_model_tag)")
+    parser.add_argument("--row-model-name", default=None,
+                        help="HF-имя модели-кодировщика строк. По умолч. "
+                             "из config.entity_resolution.token_model_name")
+    parser.add_argument("--pooling", default=None, choices=["cls", "mean"],
+                        help="Как агрегировать last_hidden_state (cls/mean)")
+    parser.add_argument("--row-prefix", default=None,
+                        help="Префикс для текстов предложений (для e5: 'query: ')")
+    parser.add_argument("--trust-remote-code", action="store_true", default=False)
+    parser.add_argument("--skip-columns", action="store_true",
+                        help="Не генерировать column embeddings заново (qwen3), "
+                             "если они уже лежат в data/embeddings/columns/<ds>/")
     args = parser.parse_args()
 
     config = Config(data_dir=Path(args.data_dir))
@@ -246,27 +261,47 @@ def main() -> None:
 
     # Генерация эмбеддингов
     if args.embeddings:
-        generate_all_embeddings(dataset_names, config, all_meta)
+        er_cfg = config.entity_resolution
+        generate_all_embeddings(
+            dataset_names, config, all_meta,
+            model_tag=args.model_tag or er_cfg.token_model_tag,
+            row_model_name=args.row_model_name or er_cfg.token_model_name,
+            pooling=args.pooling or er_cfg.row_pooling,
+            row_prefix=args.row_prefix if args.row_prefix is not None else er_cfg.row_prefix,
+            trust_remote_code=args.trust_remote_code or er_cfg.token_model_trust_remote_code,
+            skip_columns=args.skip_columns,
+        )
 
 
 def generate_all_embeddings(
     dataset_names: list[str],
     config: Config,
     all_meta: list[dict] | None = None,
+    *,
+    model_tag: str = "rubert-tiny2",
+    row_model_name: str = "cointegrated/rubert-tiny2",
+    pooling: str = "cls",
+    row_prefix: str = "",
+    trust_remote_code: bool = False,
+    skip_columns: bool = False,
 ) -> None:
     """Генерация эмбеддингов для всех датасетов.
 
-    Если `all_meta` передан (из --generate), берёт синтетические таблицы.
-    Иначе загружает оригинальные таблицы.
+    Column embeddings (qwen3) — shared: ``data/embeddings/columns/<dataset>/``.
+    Row embeddings (HF-модель) — per-tag: ``data/embeddings/rows/<model_tag>/<dataset>/``.
     """
     from table_unifier.ollama_client import OllamaClient
 
-    client = OllamaClient(config.ollama)
+    client = OllamaClient(config.ollama) if not skip_columns else None
     token_embedder = TokenEmbedder(
-        model_name=config.entity_resolution.token_model_name,
+        model_name=row_model_name,
+        pooling=pooling,
+        row_prefix=row_prefix,
+        trust_remote_code=trust_remote_code,
     )
-    out_dir = config.data_dir / "embeddings"
-    out_dir.mkdir(parents=True, exist_ok=True)
+
+    logger.info("Row-encoder: tag=%s, model=%s, pooling=%s, prefix=%r",
+                model_tag, row_model_name, pooling, row_prefix)
 
     # Индекс синтетических таблиц по имени датасета
     synth_by_name: dict[str, dict] = {}
@@ -278,8 +313,10 @@ def generate_all_embeddings(
         logger.info("Генерация эмбеддингов: %s", name)
         logger.info("=" * 60)
 
-        ds_dir = out_dir / name
-        ds_dir.mkdir(parents=True, exist_ok=True)
+        col_ds_dir = columns_dir(config.data_dir, name)
+        row_ds_dir = rows_dir(config.data_dir, model_tag, name)
+        col_ds_dir.mkdir(parents=True, exist_ok=True)
+        row_ds_dir.mkdir(parents=True, exist_ok=True)
 
         # Определяем таблицы (приоритет: in-memory → synthetic CSV → original)
         synth_dir = config.data_dir / "synthetic" / name
@@ -304,53 +341,39 @@ def generate_all_embeddings(
         columns_a = [c for c in table_a.columns if c != "id"]
         columns_b = [c for c in table_b.columns if c != "id"]
 
-        # ---- 1. Column embeddings (Ollama) ---- #
-        logger.info("[%s] Column embeddings …", name)
-        col_emb_a = generate_column_embeddings(client, table_a, columns_a)
-        col_emb_b = generate_column_embeddings(client, table_b, columns_b)
+        # ---- 1. Column embeddings (Ollama qwen3, shared) ---- #
+        col_a_path = col_ds_dir / "column_embeddings_a.npz"
+        col_b_path = col_ds_dir / "column_embeddings_b.npz"
+        if skip_columns and col_a_path.exists() and col_b_path.exists():
+            logger.info("[%s] Column embeddings уже есть в %s — пропуск", name, col_ds_dir)
+        else:
+            logger.info("[%s] Column embeddings …", name)
+            col_emb_a = generate_column_embeddings(client, table_a, columns_a)
+            col_emb_b = generate_column_embeddings(client, table_b, columns_b)
+            np.savez(col_a_path, **{col: vec for col, vec in col_emb_a.items()})
+            np.savez(col_b_path, **{col: vec for col, vec in col_emb_b.items()})
+            pd.DataFrame({"col_a": columns_a}).to_csv(col_ds_dir / "columns_a.csv", index=False)
+            pd.DataFrame({"col_b": columns_b}).to_csv(col_ds_dir / "columns_b.csv", index=False)
+            logger.info("[%s] Column embeddings → %s (%d-dim)",
+                        name, col_ds_dir,
+                        next(iter(col_emb_a.values())).shape[0])
 
-        # Сохраняем: {col_name: vector}
-        np.savez(
-            ds_dir / "column_embeddings_a.npz",
-            **{col: vec for col, vec in col_emb_a.items()},
-        )
-        np.savez(
-            ds_dir / "column_embeddings_b.npz",
-            **{col: vec for col, vec in col_emb_b.items()},
-        )
-
-        # ---- 2. Row embeddings (CLS) ---- #
-        logger.info("[%s] Row embeddings (CLS) …", name)
-        row_texts_a = [
-            serialize_row(row, columns_a)
-            for _, row in table_a.iterrows()
-        ]
-        row_texts_b = [
-            serialize_row(row, columns_b)
-            for _, row in table_b.iterrows()
-        ]
+        # ---- 2. Row embeddings (per-tag) ---- #
+        logger.info("[%s] Row embeddings (%s, %s) …", name, model_tag, pooling)
+        row_texts_a = [serialize_row(row, columns_a) for _, row in table_a.iterrows()]
+        row_texts_b = [serialize_row(row, columns_b) for _, row in table_b.iterrows()]
         row_emb_a = token_embedder.embed_sentences(row_texts_a)
         row_emb_b = token_embedder.embed_sentences(row_texts_b)
 
-        np.save(ds_dir / "row_embeddings_a.npy", row_emb_a)
-        np.save(ds_dir / "row_embeddings_b.npy", row_emb_b)
+        np.save(row_ds_dir / "row_embeddings_a.npy", row_emb_a)
+        np.save(row_ds_dir / "row_embeddings_b.npy", row_emb_b)
 
-        # ---- 3. Список столбцов (для воспроизводимости) ---- #
-        pd.DataFrame({"col_a": columns_a}).to_csv(ds_dir / "columns_a.csv", index=False)
-        pd.DataFrame({"col_b": columns_b}).to_csv(ds_dir / "columns_b.csv", index=False)
+        logger.info("[%s] rows_a=%s, rows_b=%s → %s",
+                    name, row_emb_a.shape, row_emb_b.shape, row_ds_dir)
 
-        logger.info(
-            "[%s] Готово: col_a=%d (%d-dim), col_b=%d, rows_a=%s, rows_b=%s",
-            name,
-            len(col_emb_a),
-            next(iter(col_emb_a.values())).shape[0],
-            len(col_emb_b),
-            row_emb_a.shape,
-            row_emb_b.shape,
-        )
-        logger.info("[%s] Сохранено в %s", name, ds_dir)
-
-    logger.info("Все эмбеддинги сохранены в %s", out_dir)
+    logger.info("Column → %s | Rows → %s",
+                columns_dir(config.data_dir),
+                rows_dir(config.data_dir, model_tag))
 
 
 if __name__ == "__main__":

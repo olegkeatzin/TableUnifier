@@ -28,6 +28,7 @@ from pathlib import Path
 import torch
 
 from table_unifier.config import Config, EntityResolutionConfig
+from table_unifier.paths import output_dir_for, unified_dir
 from table_unifier.training.er_trainer import (
     train_entity_resolution_bce,
     train_entity_resolution_minibatch,
@@ -71,9 +72,12 @@ def main() -> None:
     parser.add_argument("--device", default=None)
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--graph-subdir", default="v14_mrl")
+    parser.add_argument("--model-tag", default=None,
+                        help="Namespace токен-модели. По умолч. из config.")
     parser.add_argument("--num-gnn-layers", type=int, default=2)
     parser.add_argument("--num-heads", type=int, default=4,
-                        help="312 должно делиться на num_heads (4→78, 6→52, 12→26)")
+                        help="hidden_dim должен делиться на num_heads "
+                             "(4 безопасно для 312/384/768/1024)")
     parser.add_argument("--dropout", type=float, default=0.3)
     parser.add_argument("--lr", type=float, default=5e-4)
     parser.add_argument("--weight-decay", type=float, default=5e-4)
@@ -84,15 +88,16 @@ def main() -> None:
     config = Config(data_dir=Path(args.data_dir), output_dir=Path(args.output_dir))
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
 
-    unified_dir = config.data_dir / "graphs" / args.graph_subdir
+    model_tag = args.model_tag or config.entity_resolution.token_model_tag
+    graph_dir = unified_dir(config.data_dir, model_tag, args.graph_subdir)
     suffix = "_bce" if args.loss == "bce" else ""
-    save_path = config.output_dir / f"v14_mrl_gat{suffix}_model.pt"
+    save_path = output_dir_for(config.output_dir, model_tag) / f"v14_mrl_gat{suffix}_model.pt"
     save_path.parent.mkdir(parents=True, exist_ok=True)
 
-    logger.info("Загрузка MRL графа из %s ...", unified_dir)
-    graph = torch.load(unified_dir / "graph.pt", weights_only=False)
-    train_pairs = torch.load(unified_dir / "train_pairs.pt", weights_only=False)
-    val_pairs = torch.load(unified_dir / "val_pairs.pt", weights_only=False)
+    logger.info("Model=%s, граф=%s", model_tag, graph_dir)
+    graph = torch.load(graph_dir / "graph.pt", weights_only=False)
+    train_pairs = torch.load(graph_dir / "train_pairs.pt", weights_only=False)
+    val_pairs = torch.load(graph_dir / "val_pairs.pt", weights_only=False)
 
     col_dim = int(graph.col_embeddings.shape[1])
     row_dim = int(graph["row"].x.shape[1])
@@ -182,6 +187,7 @@ def main() -> None:
             "bidirectional": er_config.bidirectional,
             "use_input_projection": er_config.use_input_projection,
             "graph_subdir": args.graph_subdir,
+            "model_tag": model_tag,
         }, f, indent=2)
 
     logger.info("Обучение завершено. Модель: %s, конфиг: %s", save_path, config_path)

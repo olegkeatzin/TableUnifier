@@ -30,6 +30,10 @@ class EntityResolutionConfig:
     """Настройки модели Entity Resolution (GNN)."""
 
     token_model_name: str = "cointegrated/rubert-tiny2"
+    token_model_tag: str = "rubert-tiny2"  # namespace для data/embeddings/rows/ и data/graphs/
+    row_pooling: str = "cls"  # "cls" | "mean" — как агрегировать last_hidden_state в row-эмбеддинг
+    row_prefix: str = ""  # префикс для предложений (e5 ожидает "query: ")
+    token_model_trust_remote_code: bool = False
     row_dim: int = 312  # hidden size rubert-tiny2
     token_dim: int = 312  # vocabulary embedding dim
     col_dim: int = 4096  # qwen3-embedding:8b

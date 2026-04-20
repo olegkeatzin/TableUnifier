@@ -88,23 +88,50 @@ def generate_column_embeddings(
 # ------------------------------------------------------------------ #
 
 class TokenEmbedder:
-    """Генерирует эмбеддинги строк (CLS) и токенов (vocabulary)."""
+    """Генерирует эмбеддинги строк (CLS/mean) и токенов (vocabulary).
 
-    def __init__(self, model_name: str = "cointegrated/rubert-tiny2",
-                 device: str | None = None):
+    Args:
+        model_name: HuggingFace-имя модели-кодировщика.
+        device: 'cuda' или 'cpu'. По умолчанию — auto.
+        pooling: 'cls' или 'mean' — как агрегировать ``last_hidden_state``
+            в embedding предложения. 'mean' выполняется с учётом attention-маски.
+            e5/MiniLM/SBERT обучались с mean-pooling, LaBSE/rubert — с CLS.
+        row_prefix: префикс, добавляемый к каждому тексту перед токенизацией.
+            Для ``intfloat/multilingual-e5-*`` ожидается ``"query: "``.
+        trust_remote_code: для моделей с custom implementation
+            (``Alibaba-NLP/gte-multilingual-base``).
+    """
+
+    def __init__(
+        self,
+        model_name: str = "cointegrated/rubert-tiny2",
+        device: str | None = None,
+        pooling: str = "cls",
+        row_prefix: str = "",
+        trust_remote_code: bool = False,
+    ):
+        if pooling not in ("cls", "mean"):
+            raise ValueError(f"pooling must be 'cls' or 'mean', got {pooling!r}")
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.model = AutoModel.from_pretrained(model_name).to(self.device)
+        self.pooling = pooling
+        self.row_prefix = row_prefix
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            model_name, trust_remote_code=trust_remote_code,
+        )
+        self.model = AutoModel.from_pretrained(
+            model_name, trust_remote_code=trust_remote_code,
+        ).to(self.device)
         self.model.eval()
 
-        # Vocabulary embeddings (без контекста)
-        self.vocab_embeddings: torch.Tensor = (
-            self.model.embeddings.word_embeddings.weight.detach().clone()
-        )
+        # Vocabulary embeddings (без контекста). У большинства BERT-подобных
+        # моделей это ``model.embeddings.word_embeddings``; для экзотических
+        # архитектур используем универсальный get_input_embeddings().
+        input_emb = self.model.get_input_embeddings()
+        self.vocab_embeddings: torch.Tensor = input_emb.weight.detach().clone()
         logger.info(
-            "TokenEmbedder: model=%s, vocab=%d, dim=%d, device=%s",
+            "TokenEmbedder: model=%s, vocab=%d, dim=%d, pooling=%s, prefix=%r, device=%s",
             model_name, self.vocab_embeddings.shape[0],
-            self.vocab_embeddings.shape[1], self.device,
+            self.vocab_embeddings.shape[1], pooling, row_prefix, self.device,
         )
 
     @property
@@ -115,7 +142,9 @@ class TokenEmbedder:
 
     @torch.no_grad()
     def embed_sentences(self, texts: list[str], batch_size: int = 64) -> np.ndarray:
-        """CLS-эмбеддинги предложений. Возвращает [N, D]."""
+        """Эмбеддинги предложений. Возвращает [N, D]."""
+        if self.row_prefix:
+            texts = [self.row_prefix + t for t in texts]
         all_embs: list[np.ndarray] = []
         for i in range(0, len(texts), batch_size):
             batch = texts[i : i + batch_size]
@@ -124,8 +153,13 @@ class TokenEmbedder:
                 max_length=512, return_tensors="pt",
             ).to(self.device)
             out = self.model(**enc)
-            cls = out.last_hidden_state[:, 0]  # CLS token
-            all_embs.append(cls.cpu().numpy())
+            hidden = out.last_hidden_state  # [B, T, D]
+            if self.pooling == "cls":
+                pooled = hidden[:, 0]
+            else:  # mean
+                mask = enc["attention_mask"].unsqueeze(-1).to(hidden.dtype)
+                pooled = (hidden * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1e-9)
+            all_embs.append(pooled.cpu().numpy())
         return np.concatenate(all_embs, axis=0)
 
     # ----- Token (vocabulary) embeddings ----- #
