@@ -156,8 +156,8 @@ def run_step(title: str, cmd: list[str], dry_run: bool) -> tuple[bool, float]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Бенчмарк row-моделей (MRL + NT-Xent)")
-    parser.add_argument("--only", default=None,
-                        help="Запустить только одну модель по tag")
+    parser.add_argument("--only", nargs="+", default=None,
+                        help="Запустить только указанные модели по tag (можно несколько)")
     parser.add_argument("--exclude", nargs="*", default=[],
                         help="Пропустить модели по tag")
     parser.add_argument("--skip-existing", action="store_true",
@@ -180,9 +180,11 @@ def main() -> None:
 
     selected = REGISTRY
     if args.only:
-        selected = [m for m in REGISTRY if m.tag == args.only]
-        if not selected:
-            parser.error(f"Неизвестный --only {args.only!r}. "
+        only_set = set(args.only)
+        selected = [m for m in REGISTRY if m.tag in only_set]
+        unknown = only_set - {m.tag for m in REGISTRY}
+        if unknown:
+            parser.error(f"Неизвестные --only tags: {sorted(unknown)}. "
                          f"Доступно: {[m.tag for m in REGISTRY]}")
     if args.exclude:
         selected = [m for m in selected if m.tag not in args.exclude]
