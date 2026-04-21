@@ -210,7 +210,7 @@ def main() -> None:
                 logger.info("[%s] row embeddings уже есть в %s — пропуск", spec.tag, rows_root)
                 rec["steps"]["embeddings"] = {"status": "skipped", "path": str(rows_root)}
             else:
-                cmd = [args.python, "-m", "experiments.01_data_exploration",
+                cmd = [args.python, "-u", "-m", "experiments.01_data_exploration",
                        "--all", "--embeddings",
                        "--data-dir", str(data_dir)] + spec.emb_cli()
                 ok, dt = run_step("embeddings", cmd, args.dry_run)
@@ -227,7 +227,7 @@ def main() -> None:
                 logger.info("[%s] v14_mrl граф уже есть в %s — пропуск", spec.tag, g_dir)
                 rec["steps"]["build"] = {"status": "skipped", "path": str(g_dir)}
             else:
-                cmd = [args.python, "-m", "experiments.14_build_unified_graph_mrl",
+                cmd = [args.python, "-u", "-m", "experiments.14_build_unified_graph_mrl",
                        "--data-dir", str(data_dir)] + spec.build_cli()
                 ok, dt = run_step("build", cmd, args.dry_run)
                 rec["steps"]["build"] = {"status": "ok" if ok else "fail",
@@ -243,7 +243,7 @@ def main() -> None:
                 logger.info("[%s] модель уже обучена: %s — пропуск", spec.tag, out_ckpt)
                 rec["steps"]["train"] = {"status": "skipped", "path": str(out_ckpt)}
             else:
-                cmd = [args.python, "-m", "experiments.14_train_gat_mrl",
+                cmd = [args.python, "-u", "-m", "experiments.14_train_gat_mrl",
                        "--loss", "ntxent",
                        "--max-epochs", str(args.max_epochs),
                        "--patience", str(args.patience),
