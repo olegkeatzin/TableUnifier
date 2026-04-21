@@ -245,14 +245,15 @@ def main() -> None:
         parser.error("Укажите --dataset <name> или --all")
         return
 
-    # Анализ
-    for name in dataset_names:
-        try:
-            csv_path = download_dataset(name, config.data_dir)
-            tables = load_dataset(csv_path, name=name)
-            explore_dataset(name, tables)
-        except Exception:
-            logger.exception("Ошибка загрузки %s — пропуск", name)
+    # Анализ — только при интерактивной эксплорации, не при --embeddings / --generate
+    if not (args.embeddings or args.generate):
+        for name in dataset_names:
+            try:
+                csv_path = download_dataset(name, config.data_dir)
+                tables = load_dataset(csv_path, name=name)
+                explore_dataset(name, tables)
+            except Exception:
+                logger.exception("Ошибка загрузки %s — пропуск", name)
 
     # Генерация (опционально)
     all_meta = None
