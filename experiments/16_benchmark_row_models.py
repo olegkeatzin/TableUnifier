@@ -1,11 +1,13 @@
 """Эксперимент 16 — Бенчмарк разных токен-моделей на MRL + NT-Xent пайплайне.
 
-Сравнивает rubert-tiny2 (baseline) с 5 альтернативными моделями:
+Сравнивает rubert-tiny2 (baseline) с 7 альтернативными моделями:
   * sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2 (384-dim)
   * intfloat/multilingual-e5-base (768-dim, prefix "query: ")
   * cointegrated/LaBSE-en-ru (768-dim)
   * ai-forever/sbert_large_nlu_ru (1024-dim)
   * Alibaba-NLP/gte-multilingual-base (768-dim, trust_remote_code)
+  * intfloat/multilingual-e5-large (1024-dim, prefix "query: ")
+  * BAAI/bge-m3 (1024-dim)
 
 Для каждой модели:
   1. ``01_data_exploration.py --all --embeddings --skip-columns`` — row embeddings
@@ -120,6 +122,21 @@ REGISTRY: list[ModelSpec] = [
         hidden_dim=768,
         pooling="cls",
         trust_remote_code=True,
+    ),
+    ModelSpec(
+        tag="e5-large",
+        hf_name="intfloat/multilingual-e5-large",
+        hidden_dim=1024,
+        pooling="mean",
+        row_prefix="query: ",
+        notes="scaling к e5-base",
+    ),
+    ModelSpec(
+        tag="bge-m3",
+        hf_name="BAAI/bge-m3",
+        hidden_dim=1024,
+        pooling="cls",
+        notes="топ-retrieval multilingual baseline",
     ),
 ]
 

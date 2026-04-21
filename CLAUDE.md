@@ -42,6 +42,13 @@ uv run python experiments/12_label_real_data.py
 uv run python experiments/13_label_with_agent.py   # требует gemma4:26b + интернет
 uv run python experiments/14_build_unified_graph_mrl.py
 uv run python experiments/14_train_gat_mrl.py
+uv run python experiments/16_benchmark_row_models.py --dry-run   # бенчмарк 6 токен-моделей
+```
+
+### Миграция существующих данных в namespace-раскладку
+```bash
+bash scripts/migrate_to_model_tag.sh --dry-run   # посмотреть, что двинется
+bash scripts/migrate_to_model_tag.sh             # выполнить (идемпотентен)
 ```
 
 ### Experiment Tracking
@@ -59,17 +66,20 @@ uv run mlflow ui --backend-store-uri sqlite:///mlflow.db  # View results at http
 
 ```
 CSV Tables
-  → [embedding_generation.py]  rubert-tiny2 (row/token, 312-dim) + Ollama qwen3-embedding:8b (column, 4096-dim)
+  → [embedding_generation.py]  TokenEmbedder (row/token, HF-модель, pooling=cls|mean) +
+                               Ollama qwen3-embedding:8b (column, 4096-dim)
   → [graph_builder.py]         HeteroData: row nodes, token nodes, token→row edges (col embeddings as attr)
   → [schema_trainer.py]        SchemaProjector: 4096→256-dim column metric space
   → [er_trainer.py]            EntityResolutionGNN: row embeddings → cosine similarity → duplicate detection
 ```
 
+Дефолтная токен-модель — `cointegrated/rubert-tiny2` (312-dim). В exp 16 сравниваются 6 моделей (MiniLM-384, e5-base-768, LaBSE-en-ru-768, sbert_large_nlu_ru-1024, gte-multilingual-768, rubert-tiny2-312) на MRL + NT-Xent пайплайне.
+
 ### Model Architecture
 
 **SchemaProjector** (`models/schema_matching.py`): MLP проецирует 4096-dim column embeddings в 256-dim метрическое пространство с L2-нормализацией. Обучается на Triplet Loss по парам столбцов.
 
-**EntityResolutionGNN** (`models/entity_resolution.py`): Гетерогенный GNN с `L` слоями `EdgeMeanConv`. Узлы: `row` (312-dim CLS) и `token` (312-dim vocab). Рёбра `token→row` несут column embeddings (4096-dim) как атрибуты. Финальные row embeddings используются для поиска дубликатов через косинусное сходство.
+**EntityResolutionGNN** (`models/entity_resolution.py`): Гетерогенный GNN с `L` слоями `EdgeMeanConv`. Узлы: `row` (hidden size токен-модели, pooled из `last_hidden_state`) и `token` (vocabulary embeddings). Рёбра `token→row` несут column embeddings (4096-dim, либо MRL-обрезка до hidden) как атрибуты. Финальные row embeddings используются для поиска дубликатов через косинусное сходство.
 
 **EntityResolutionGAT** (`models/entity_resolution.py`): Альтернативная архитектура — то же, но использует GATv2Conv вместо EdgeMeanConv. Эксперименты 09, 11 тренируют эту модель.
 
@@ -81,17 +91,38 @@ CSV Tables
 
 ### Key Design Decisions
 
-- **Два типа эмбеддингов строк**: CLS-токен rubert-tiny2 (312-dim) для узлов row, vocabulary embeddings того же rubert для узлов token
+- **Два типа эмбеддингов строк**: pooled `last_hidden_state` токен-модели (hidden size: 312/384/768/1024) для узлов row; её же `get_input_embeddings()` для узлов token
 - **Column embeddings как атрибуты рёбер**: Позволяет модели учитывать контекст столбца при агрегации
 - **Multi-dataset training**: `train_entity_resolution_multidataset()` обучает модель round-robin на нескольких датасетах — ключевой механизм transfer learning
 - **IDF-фильтрация токенов**: В `graph_builder.py` токены фильтруются по IDF для снижения шума и размера графа
+- **Namespace по токен-модели**: row-эмбеддинги, графы и чекпоинты лежат под `<model_tag>/`, чтобы одновременно хранить артефакты нескольких моделей (см. `src/table_unifier/paths.py`). Column-эмбеддинги qwen3 — shared, не зависят от row-модели.
 
 ### Data Flow Details
 
 - Датасеты: Magellan Data Repository (20+ бенчмарков — beer, bikes, movies, books и др.)
-- Предвычисленные данные хранятся в `data/embeddings/` и `data/graphs/` (исключены из git)
-- Обученные модели сохраняются в `output/` (исключены из git, `*.pt`/`*.pth`)
+- Предвычисленные данные хранятся в `data/` (исключены из git)
+- Обученные модели сохраняются в `output/<model_tag>/` (исключены из git, `*.pt`/`*.pth`)
 - Эксперименты трекируются через MLflow (`mlflow.db`)
+
+Раскладка `data/` после миграции (см. `scripts/migrate_to_model_tag.sh`):
+
+```
+data/
+├── synthetic/<dataset>/           # таблицы A/B + train/valid/test — shared
+├── embeddings/
+│   ├── columns/<dataset>/         # column_embeddings_{a,b}.npz + columns_{a,b}.csv (qwen3, shared)
+│   └── rows/<model_tag>/<dataset>/  # row_embeddings_{a,b}.npy (per-модель)
+└── graphs/<model_tag>/
+    ├── <dataset>/                 # per-dataset графы (exp 02)
+    ├── v3_unified/                # unified, exp 08
+    ├── v14_mrl/                   # MRL unified, exp 14
+    └── v14_mrl_cross/<dataset>/   # cross-domain, exp 14
+output/<model_tag>/
+    ├── v14_mrl_gat_model.pt       # и аналоги для других лоссов/экспериментов
+    └── *.config.json
+```
+
+`model_tag` задаётся через `EntityResolutionConfig.token_model_tag` или CLI-флаг `--model-tag`. Дефолт — `rubert-tiny2`.
 
 ### Config System
 
@@ -107,9 +138,10 @@ All paths relative to `src/table_unifier/`:
 | Модуль | Назначение |
 |--------|-----------|
 | `config.py` | Все конфиги как датаклассы |
+| `paths.py` | Namespaced-раскладка: `columns_dir`, `rows_dir`, `unified_dir`, `output_dir_for` |
 | `ollama_client.py` | Обёртка над Ollama API |
 | `dataset/download.py` | Скачивание с Magellan Data Repository |
-| `dataset/embedding_generation.py` | rubert-tiny2 + Ollama embeddings |
+| `dataset/embedding_generation.py` | `TokenEmbedder` (HF-модель, cls/mean pooling, префикс) + Ollama column embeddings |
 | `dataset/graph_builder.py` | Построение HeteroData графов |
 | `dataset/pair_sampling.py` | Генерация пар/триплетов для обучения |
 | `dataset/data_split.py` | Стратифицированный split по связным компонентам |
