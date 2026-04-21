@@ -255,16 +255,36 @@ def main() -> None:
 
         summary.append(rec)
 
-    # Сводка
+    # Сводка: мержим с существующей, чтобы не терять записи других моделей
     summary_path = output_dir / "benchmark_row_models.json"
     summary_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(summary_path, "w", encoding="utf-8") as f:
-        json.dump({"models": summary}, f, ensure_ascii=False, indent=2)
-    logger.info("Сводка: %s", summary_path)
+
+    merged: dict[str, dict] = {}
+    if summary_path.exists():
+        try:
+            with open(summary_path, encoding="utf-8") as f:
+                existing = json.load(f)
+            for rec in existing.get("models", []):
+                if "tag" in rec:
+                    merged[rec["tag"]] = rec
+        except json.JSONDecodeError:
+            logger.warning("Существующая сводка повреждена — перезапишу целиком")
+
     for rec in summary:
+        merged[rec["tag"]] = rec
+
+    # Порядок = REGISTRY + хвост из неизвестных тегов (на всякий случай)
+    order = [m.tag for m in REGISTRY]
+    models_out = [merged[t] for t in order if t in merged]
+    models_out += [merged[t] for t in merged if t not in order]
+
+    with open(summary_path, "w", encoding="utf-8") as f:
+        json.dump({"models": models_out}, f, ensure_ascii=False, indent=2)
+    logger.info("Сводка: %s (всего %d моделей)", summary_path, len(models_out))
+    for rec in models_out:
         stats = " | ".join(
             f"{step}={info.get('status', '?')}"
-            for step, info in rec["steps"].items()
+            for step, info in rec.get("steps", {}).items()
         )
         logger.info("  %-18s %s", rec["tag"], stats)
 
