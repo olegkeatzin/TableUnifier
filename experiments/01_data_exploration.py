@@ -362,8 +362,10 @@ def generate_all_embeddings(
         logger.info("[%s] Row embeddings (%s, %s) …", name, model_tag, pooling)
         row_texts_a = [serialize_row(row, columns_a) for _, row in table_a.iterrows()]
         row_texts_b = [serialize_row(row, columns_b) for _, row in table_b.iterrows()]
-        row_emb_a = token_embedder.embed_sentences(row_texts_a)
-        row_emb_b = token_embedder.embed_sentences(row_texts_b)
+        row_emb_a = token_embedder.embed_sentences(
+            row_texts_a, desc=f"[{name}] A ({len(row_texts_a):,} rows)")
+        row_emb_b = token_embedder.embed_sentences(
+            row_texts_b, desc=f"[{name}] B ({len(row_texts_b):,} rows)")
 
         np.save(row_ds_dir / "row_embeddings_a.npy", row_emb_a)
         np.save(row_ds_dir / "row_embeddings_b.npy", row_emb_b)

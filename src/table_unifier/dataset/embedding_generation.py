@@ -141,12 +141,17 @@ class TokenEmbedder:
     # ----- Sentence (Row) embeddings ----- #
 
     @torch.no_grad()
-    def embed_sentences(self, texts: list[str], batch_size: int = 64) -> np.ndarray:
+    def embed_sentences(self, texts: list[str], batch_size: int = 64,
+                        desc: str = "Row embeddings") -> np.ndarray:
         """Эмбеддинги предложений. Возвращает [N, D]."""
         if self.row_prefix:
             texts = [self.row_prefix + t for t in texts]
         all_embs: list[np.ndarray] = []
-        for i in range(0, len(texts), batch_size):
+        n_batches = (len(texts) + batch_size - 1) // batch_size
+        pbar = tqdm(range(0, len(texts), batch_size),
+                    total=n_batches, desc=desc, unit="batch",
+                    dynamic_ncols=True, leave=False)
+        for i in pbar:
             batch = texts[i : i + batch_size]
             enc = self.tokenizer(
                 batch, padding=True, truncation=True,
