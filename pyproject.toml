@@ -30,6 +30,8 @@ dependencies = [
     "langchain-community>=0.4.1",
     "langgraph>=0.4",
     "ddgs>=9.12.1",
+    "dvc>=3.67.1",
+    "dvc-webdav>=3.0.1",
 ]
 
 [build-system]

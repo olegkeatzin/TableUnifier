@@ -1,0 +1,5 @@
+[core]
+    remote = yadisk
+['remote "yadisk"']
+    url = remote://yandex/TableUnifier
+    rclone_config = /home/user/.config/rclone/rclone.conf
