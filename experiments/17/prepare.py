@@ -167,7 +167,7 @@ def prepare_cars_ru() -> pd.DataFrame:
 
 def prepare_ozon() -> pd.DataFrame:
     root = Path(kagglehub.dataset_download(
-        "fiftin/ozon-what-products-do-users-add-to-favorites"
+        "fiftin/ozon-what-products-do-users-add-to-favs"
     ))
     xlsx = sorted(p for p in root.rglob("*") if p.suffix.lower() in {".xlsx", ".xls"})
     parts = []
@@ -205,7 +205,7 @@ def prepare_auto_ru() -> pd.DataFrame:
 
 
 def prepare_auto_ru_2020() -> pd.DataFrame:
-    root = Path(kagglehub.dataset_download("snezhanausova/all-auto-ru-14-11-2020"))
+    root = Path(kagglehub.dataset_download("snezhanausova/all-auto-ru-14-11-2020csv"))
     files = sorted(
         p for p in root.rglob("*") if p.suffix.lower() in {".csv", ".parquet"}
     )
@@ -227,7 +227,7 @@ def prepare_auto_ru_2020() -> pd.DataFrame:
 
 
 def prepare_devices() -> pd.DataFrame:
-    root = Path(kagglehub.dataset_download("ruslanusov/dataset-device-status-15k"))
+    root = Path(kagglehub.dataset_download("ruslanusov/dataset-of-electronics-with-lifecycle-and-specs"))
     ru_file = next(root.rglob("device_dataset_with_status_15*.json"))
     raw = json.loads(ru_file.read_text(encoding="utf-8"))
     df = pd.json_normalize(raw, sep=".")
@@ -252,10 +252,19 @@ def main() -> None:
     ap.add_argument("--only", nargs="*", choices=list(PREPARATORS))
     args = ap.parse_args()
     keys = args.only or list(PREPARATORS)
+    failures: list[tuple[str, str]] = []
     for key in keys:
         print(f"\n=== {key} ===")
-        df = PREPARATORS[key]()
-        print(f"saved: {OUT_ROOT / key / 'clean.parquet'}  shape={df.shape}")
+        try:
+            df = PREPARATORS[key]()
+            print(f"saved: {OUT_ROOT / key / 'clean.parquet'}  shape={df.shape}")
+        except Exception as e:
+            print(f"FAILED: {type(e).__name__}: {e}")
+            failures.append((key, f"{type(e).__name__}: {e}"))
+    if failures:
+        print("\n--- failures ---")
+        for k, msg in failures:
+            print(f"  {k}: {msg}")
 
 
 if __name__ == "__main__":
