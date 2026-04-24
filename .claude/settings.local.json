@@ -17,7 +17,9 @@
       "Bash(python3 -c ':*)",
       "WebSearch",
       "Bash(ls -la \"/home/user/Рабочий стол/TableUnifier/data/labeled/\"*.parquet)",
-      "Bash(python3:*)"
+      "Bash(python3:*)",
+      "Bash(ls output/)",
+      "Bash(ls data/graphs/)"
     ]
   }
 }

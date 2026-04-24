@@ -33,6 +33,7 @@ dependencies = [
     "dvc>=3.67.1",
     "dvc-webdav>=3.0.1",
     "kagglehub>=0.3.0",
+    "deap>=1.4.1",
 ]
 
 [build-system]
