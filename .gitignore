@@ -21,3 +21,6 @@ output/
 /data
 /output
 /mlflow.db
+
+# Secrets
+kaggle.json
