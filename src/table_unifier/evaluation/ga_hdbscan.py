@@ -34,7 +34,11 @@ from typing import Any
 
 import numpy as np
 import torch
-from sklearn.metrics import f1_score, precision_score, recall_score
+
+from table_unifier.evaluation.ga_common import (
+    pair_fitness_from_labels,
+    pair_metrics_from_labels,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -66,12 +70,19 @@ class GAHDBSCANConfig:
     cxpb: float = 0.6
     mutpb: float = 0.3
     tournament_size: int = 3
-    min_cluster_size_bounds: tuple[int, int] = (2, 100)
-    min_samples_bounds: tuple[int, int] = (1, 50)
+    # ER-приор: дубликаты группируются по 2-3, а не по сотням, поэтому
+    # min_cluster_size держим в узком диапазоне. Большие значения превращают
+    # все настоящие пары в шум (-1) и обрушивают recall.
+    min_cluster_size_bounds: tuple[int, int] = (2, 5)
+    min_samples_bounds: tuple[int, int] = (1, 5)
     epsilon_bounds: tuple[float, float] = (0.0, 1.0)
     seed: int = 42
     n_jobs: int = 1  # core_dist_n_jobs для CPU-бэкенда
     backend: str = "auto"  # cpu / gpu / auto
+    # Фитнес: F-beta + penalty за гигантский кластер (см. ga_common.py).
+    fbeta: float = 1.0
+    giant_cluster_threshold: float = 0.5
+    giant_cluster_penalty: float = 0.5
 
 
 @dataclass
@@ -135,24 +146,11 @@ def cluster_embeddings(
     return clusterer.fit_predict(embeddings)
 
 
-def cluster_labels_to_pair_preds(
-    cluster_labels: np.ndarray,
-    pairs: torch.Tensor | np.ndarray,
-) -> np.ndarray:
-    """Предсказания на парах из меток кластеров.
-
-    match(a, b) = 1  iff  cluster[a] == cluster[b]  AND  cluster[a] != -1.
-    """
-    if isinstance(pairs, torch.Tensor):
-        pairs_np = pairs.cpu().numpy()
-    else:
-        pairs_np = np.asarray(pairs)
-
-    a_idx = pairs_np[:, 0]
-    b_idx = pairs_np[:, 1]
-    la = cluster_labels[a_idx]
-    lb = cluster_labels[b_idx]
-    return ((la == lb) & (la != -1)).astype(int)
+# Pair-предикторы и метрики переехали в ga_common.py (общие для HDBSCAN/CC).
+# Реэкспортируем для обратной совместимости.
+from table_unifier.evaluation.ga_common import (  # noqa: E402
+    cluster_labels_to_pair_preds,
+)
 
 
 def evaluate_params_on_pairs(
@@ -164,28 +162,7 @@ def evaluate_params_on_pairs(
 ) -> dict[str, float]:
     """F1 / Precision / Recall пар при заданных параметрах HDBSCAN."""
     cluster_labels = cluster_embeddings(embeddings, params, n_jobs=n_jobs, backend=backend)
-
-    pairs_np = pairs.cpu().numpy() if isinstance(pairs, torch.Tensor) else np.asarray(pairs)
-    y_true = pairs_np[:, 2]
-    y_pred = cluster_labels_to_pair_preds(cluster_labels, pairs_np)
-
-    n_clusters = int((cluster_labels != -1).max() + 1) if (cluster_labels != -1).any() else 0
-    n_noise = int((cluster_labels == -1).sum())
-
-    if len(np.unique(y_true)) < 2:
-        return {"f1": 0.0, "precision": 0.0, "recall": 0.0,
-                "n_clusters": n_clusters, "n_noise": n_noise}
-
-    return {
-        "f1": float(f1_score(y_true, y_pred, zero_division=0)),
-        "precision": float(precision_score(y_true, y_pred, zero_division=0)),
-        "recall": float(recall_score(y_true, y_pred, zero_division=0)),
-        "n_clusters": n_clusters,
-        "n_noise": n_noise,
-        "n_predicted_pos": int(y_pred.sum()),
-        "n_pos": int(y_true.sum()),
-        "n_pairs": int(len(y_true)),
-    }
+    return pair_metrics_from_labels(cluster_labels, pairs, noise_label=-1)
 
 
 def run_ga_hdbscan(
@@ -253,23 +230,33 @@ def run_ga_hdbscan(
         if key in cache:
             return (cache[key],)
         try:
-            metrics = evaluate_params_on_pairs(
-                embeddings, val_pairs, params,
-                n_jobs=cfg.n_jobs, backend=backend,
+            labels = cluster_embeddings(
+                embeddings, params, n_jobs=cfg.n_jobs, backend=backend,
             )
-            f1 = metrics["f1"]
+            score = pair_fitness_from_labels(
+                labels, val_pairs,
+                fbeta=cfg.fbeta,
+                giant_cluster_threshold=cfg.giant_cluster_threshold,
+                giant_cluster_penalty=cfg.giant_cluster_penalty,
+                noise_label=-1,
+            )
         except Exception as e:  # HDBSCAN иногда падает на патологических параметрах
             logger.debug("HDBSCAN fail for %s: %s", params, e)
-            f1 = 0.0
-        cache[key] = f1
-        return (f1,)
+            score = 0.0
+        cache[key] = score
+        return (score,)
+
+    # Шаг мутации int-генов масштабируем к ширине bounds (после сужения
+    # дефолтных диапазонов до ER-приора фиксированный ±5 был бы вырожденным).
+    mcs_step = max(1, (mcs_hi - mcs_lo) // 4)
+    ms_step = max(1, (ms_hi - ms_lo) // 4)
 
     def mutate(ind: list) -> tuple[list]:
         # По одному гену мутируем с вероятностью 0.3
         if random.random() < 0.3:
-            ind[0] = int(np.clip(ind[0] + random.randint(-5, 5), mcs_lo, mcs_hi))
+            ind[0] = int(np.clip(ind[0] + random.randint(-mcs_step, mcs_step), mcs_lo, mcs_hi))
         if random.random() < 0.3:
-            ind[1] = int(np.clip(ind[1] + random.randint(-3, 3), ms_lo, ms_hi))
+            ind[1] = int(np.clip(ind[1] + random.randint(-ms_step, ms_step), ms_lo, ms_hi))
         if random.random() < 0.3:
             ind[2] = float(np.clip(ind[2] + random.gauss(0.0, 0.1), eps_lo, eps_hi))
         if random.random() < 0.2:
@@ -317,12 +304,14 @@ def run_ga_hdbscan(
             best_all = creator.IndividualGA(list(best_gen))
             best_all.fitness.values = best_gen.fitness.values
 
-        f1s = [ind.fitness.values[0] for ind in pop]
+        fits = [ind.fitness.values[0] for ind in pop]
         history.append({
             "gen": gen,
-            "best_f1": float(max(f1s)),
-            "mean_f1": float(np.mean(f1s)),
-            "worst_f1": float(min(f1s)),
+            # Имена оставлены best_f1/mean_f1/worst_f1 для совместимости с
+            # ноутбуком; реально это F-beta с possible penalty (см. GAHDBSCANConfig).
+            "best_f1": float(max(fits)),
+            "mean_f1": float(np.mean(fits)),
+            "worst_f1": float(min(fits)),
             "n_cached": len(cache),
         })
         logger.info("GA gen %2d/%d | best=%.4f mean=%.4f cache=%d",
