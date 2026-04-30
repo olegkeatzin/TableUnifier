@@ -128,6 +128,10 @@ def _save(df: pd.DataFrame, name: str) -> Path:
                 df[col] = df[col].map(
                     lambda v: json.dumps(v, ensure_ascii=False) if isinstance(v, (list, dict)) else v
                 )
+            else:
+                types_seen = {type(v) for v in df[col].dropna()}
+                if len(types_seen) > 1:
+                    df[col] = df[col].map(lambda v: str(v) if pd.notna(v) else v)
     path = out / "clean.parquet"
     df.to_parquet(path, index=False)
     return path
