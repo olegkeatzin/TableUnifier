@@ -23,7 +23,11 @@ from pathlib import Path
 import kagglehub
 import pandas as pd
 
-TOP_N_OPTIONS = 30
+# None = без отсечки (multi-hot для ВСЕХ уникальных опций).
+# Идея: реальные поставщики добавляют/убирают колонки по своему усмотрению,
+# а модель должна учиться обрабатывать редкие колонки и пропуски — top-N
+# искусственно сглаживает разнообразие, поэтому держим всё.
+TOP_N_OPTIONS: int | None = None
 
 
 def _project_root() -> Path:
@@ -79,21 +83,24 @@ def _flatten_dict_col(series: pd.Series, prefix: str) -> pd.DataFrame:
     return flat
 
 
-def _multi_hot_from_lists(lists: pd.Series, n: int, prefix: str) -> pd.DataFrame:
+def _multi_hot_from_lists(lists: pd.Series, n: int | None, prefix: str) -> pd.DataFrame:
     counter: Counter = Counter()
     for lst in lists:
         if isinstance(lst, list):
             counter.update(lst)
-    top = [k for k, _ in counter.most_common(n)]
+    if n is None:
+        keys = list(counter.keys())
+    else:
+        keys = [k for k, _ in counter.most_common(n)]
     out = pd.DataFrame(index=lists.index)
-    for opt in top:
+    for opt in keys:
         out[f"{prefix}_{opt}"] = lists.map(
             lambda lst, o=opt: isinstance(lst, list) and o in lst
         )
     return out
 
 
-def _multi_hot_array(series: pd.Series, n: int, prefix: str) -> pd.DataFrame:
+def _multi_hot_array(series: pd.Series, n: int | None, prefix: str) -> pd.DataFrame:
     def to_list(v):
         obj = _parse_flex(v)
         if isinstance(obj, list):
