@@ -107,8 +107,11 @@ def _multi_hot_array(series: pd.Series, n: int, prefix: str) -> pd.DataFrame:
 def _drop_dead(df: pd.DataFrame, extra_drop: tuple[str, ...] = ()) -> pd.DataFrame:
     drop = set(extra_drop)
     for col in df.columns:
-        if df[col].nunique(dropna=True) <= 1:
-            drop.add(col)
+        try:
+            if df[col].nunique(dropna=True) <= 1:
+                drop.add(col)
+        except TypeError:
+            pass  # list/dict values — column is not constant, keep it
     return df.drop(columns=[c for c in drop if c in df.columns])
 
 
