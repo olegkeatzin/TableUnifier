@@ -105,7 +105,7 @@ CSV Tables
 
 - **Два типа эмбеддингов строк**: pooled `last_hidden_state` токен-модели (hidden size: 312/384/768/1024) для узлов row; её же `get_input_embeddings()` для узлов token
 - **Column embeddings как атрибуты рёбер**: Позволяет модели учитывать контекст столбца при агрегации
-- **Multi-dataset training**: `train_entity_resolution_multidataset()` обучает модель round-robin на нескольких датасетах — ключевой механизм transfer learning
+- **Unified graph (winning approach)**: все датасеты объединяются в один большой HeteroData с глобальным token-вокабуляром (exp 08 → exp 14 с MRL). Это даёт **лучшие результаты, чем round-robin** обучение по per-dataset графам. Round-robin (`train_entity_resolution_multidataset()`) остаётся в коде как baseline, но новые эксперименты строят unified.
 - **IDF-фильтрация токенов**: В `graph_builder.py` токены фильтруются по IDF для снижения шума и размера графа
 - **Namespace по токен-модели**: row-эмбеддинги, графы и чекпоинты лежат под `<model_tag>/`, чтобы одновременно хранить артефакты нескольких моделей (см. `src/table_unifier/paths.py`). Column-эмбеддинги qwen3 — shared, не зависят от row-модели.
 - **HDBSCAN + GA (exp 18)**: вместо порогового поиска на косинусном сходстве — кластеризация HDBSCAN с параметрами, подобранными генетическим алгоритмом (DEAP) по F1 на val pairs.
