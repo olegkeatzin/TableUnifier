@@ -40,7 +40,12 @@ uv run python -m experiments.18_ga_hdbscan_bge_m3
 # Подготовка русских датасетов (exp 17)
 cd experiments/17 && uv run python prepare.py          # все датасеты
 cd experiments/17 && uv run python prepare.py --only lamoda cars_ru  # выборочно
-# Интерактивный просмотр результатов — experiments/17/02_prepare.ipynb
+# Ноутбуки exp 17 (запускать на nvidia-server, данных локально нет):
+#   02_prepare.ipynb  — обзор подготовленных датасетов
+#   03_eda_v2.ipynb   — EDA: качество natural labels, format divergence, column dropout
+cd experiments/17 && uv run python 04_synth_pairs.py          # natural pairs (auto_ru, ozon) + базовая синтетика
+cd experiments/17 && uv run python 05_generate_synonyms.py    # LLM-синонимы колонок и значений (требует Ollama)
+cd experiments/17 && uv run python 06_build_views.py          # N=4 supplier views → C(4,2)=6 датасетов на источник
 ```
 
 ### Миграция существующих данных в namespace-раскладку
@@ -114,6 +119,15 @@ CSV Tables
 
 - **Синтетические датасеты**: Magellan Data Repository (20+ бенчмарков — beer, bikes, movies, books и др.), хранятся в `data/synthetic/`
 - **Русские датасеты** (exp 17): 6 датасетов с Kaggle (Lamoda, cars.ru, Ozon, auto.ru ×2, DeviceStatus 15K). Скачиваются через `kagglehub`, подготовленные parquet-файлы — `data/raw_ru/<name>/clean.parquet`. Скрипт подготовки: `experiments/17/prepare.py`
+
+  **Natural labels** (результаты `03_eda_v2.ipynb`):
+  - `auto_ru × auto_ru_2020`: 16,955 sell_id пар — два независимых скрейпа auto.ru с разными парсерами. **sell_id обязательно дропать из признаков** (trivial leakage — 100% совпадает в парах). Форматные расхождения: `color` (текст vs HEX), `bodyType` (регистр). 170/365 общих колонок совпадают точно, медиана divergence 0.1% — реалистичная, но умеренная задача.
+  - `ozon`: 318,850 cross-file URL пар (один URL в 34 разных месячных выгрузках). 100% пар cross-file, 95.6% имеют разные счётчики избранного → валидные natural labels.
+  - `lamoda`: `about.Артикул` уникален (0 дублей из 10,318) — натуральных пар нет. Title+Brand FP rate 65.3% — мусор. Только синтетика.
+  - `cars_ru`: нет VIN, description дублей 2.6% — natural pairs нет. Только синтетика.
+  - `devices`: синтетический датасет (37% model_id разделяют >1 производитель). Только синтетика.
+
+  **column_dropout в реальных парах** (auto_ru × auto_ru_2020): null-divergence медиана 0.0% — колонки не выпадают. Значит агрессивный dropout нужно симулировать в `04_synth_pairs.py`.
 - Предвычисленные данные хранятся в `data/` (исключены из git, синхронизируются через rclone)
 - Обученные модели сохраняются в `output/<model_tag>/` (исключены из git, `*.pt`/`*.pth`)
 - Эксперименты трекируются через MLflow (`mlflow.db`)

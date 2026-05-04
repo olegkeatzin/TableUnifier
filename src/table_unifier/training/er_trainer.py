@@ -400,8 +400,17 @@ def train_entity_resolution_minibatch(
         if val_pos_mask.sum() > 0:
             val_pos_pairs = val_pairs[val_pos_mask][:, :2]
 
-    # Seed nodes = все строки из позитивных пар
-    all_train_rows = torch.unique(torch.cat([train_pos_pairs[:, 0], train_pos_pairs[:, 1]]))
+    # Seed nodes = все строки из позитивных пар.
+    # Чередуем (a0,b0,a1,b1,...) — при shuffle=True NeighborLoader партнёры
+    # чаще попадают в один батч, что важно для NT-Xent с multi-view парами.
+    interleaved = torch.stack([train_pos_pairs[:, 0], train_pos_pairs[:, 1]], dim=1).reshape(-1)
+    seen_set: set[int] = set()
+    unique_ordered: list[int] = []
+    for idx in interleaved.tolist():
+        if idx not in seen_set:
+            seen_set.add(idx)
+            unique_ordered.append(idx)
+    all_train_rows = torch.tensor(unique_ordered, dtype=torch.long)
 
     # NeighborLoader: сколько соседей сэмплировать на каждом слое
     # 16 вместо 32 — снижает размер подграфа в ~4x, экономит VRAM
