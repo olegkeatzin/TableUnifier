@@ -16,6 +16,14 @@ import pandas as pd
 #  Элементарные операции
 # ------------------------------------------------------------------ #
 
+_BOOL_FLIP = {"True": "False", "False": "True", "true": "false", "false": "true"}
+
+
+def flip_bool(value: str) -> str:
+    """Flip True↔False string values."""
+    return _BOOL_FLIP.get(value, value)
+
+
 def add_typo(text: str, char_prob: float = 0.08) -> str:
     """Случайная перестановка соседних символов."""
     chars = list(text)
@@ -64,6 +72,10 @@ def corrupt_value(
 ) -> str:
     """Применить одну из стратегий порчи к значению ячейки."""
     value = str(value)
+    if value == "nan":
+        return value  # не трогаем пустые ячейки
+    if value in _BOOL_FLIP:
+        return flip_bool(value)  # bool-колонки всегда флипаем
     r = random.random()
     if r < typo_prob:
         return add_typo(value)
