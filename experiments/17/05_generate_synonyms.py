@@ -51,6 +51,34 @@ N_VAL_SYNS = 3
 
 
 # ------------------------------------------------------------------ #
+#  Namespace-префикс (about., technical_specs. и т.п.)
+# ------------------------------------------------------------------ #
+
+def _detect_namespace_prefix(cols: list[str], threshold: float = 0.3) -> str:
+    """Определить доминирующий namespace-префикс вида 'about.' или 'technical_specs.'.
+
+    Если >threshold колонок начинаются с одного и того же 'prefix.', возвращает его.
+    Нужно чтобы не отправлять LLM 'about.Цвет' — она генерирует 'about.color' вместо 'color'.
+    """
+    from collections import Counter
+    prefixes = Counter(
+        col.split(".", 1)[0] + "."
+        for col in cols
+        if "." in col and not col.startswith("_")
+    )
+    if not prefixes:
+        return ""
+    top, count = prefixes.most_common(1)[0]
+    return top if count / len(cols) >= threshold else ""
+
+
+def _strip_prefix(text: str, prefix: str) -> str:
+    if prefix and text.startswith(prefix):
+        return text[len(prefix):]
+    return text
+
+
+# ------------------------------------------------------------------ #
 #  JSON-парсинг из ответа LLM
 # ------------------------------------------------------------------ #
 
@@ -106,9 +134,12 @@ def _col_synonyms_prompt(cols: list[str], domain: str) -> str:
     col_list = "\n".join(f"- {c}" for c in cols)
     return (
         f"Ты работаешь с таблицей данных из домена: «{domain}».\n"
-        f"Для каждого названия колонки придумай ровно {N_COL_SYNS} альтернативных варианта.\n"
+        f"Для каждого названия колонки придумай РОВНО {N_COL_SYNS} альтернативных варианта "
+        f"(не меньше, не больше — строго {N_COL_SYNS} штуки в массиве).\n"
         "Варианты могут быть: перевод (рус↔англ), синоним, сокращение, другой регистр, "
-        "другая нотация (snake_case / camelCase / с пробелами).\n\n"
+        "другая нотация (snake_case / camelCase / с пробелами).\n"
+        "ВАЖНО: синоним должен называть ТУ ЖЕ сущность, но так, как её назвал бы другой "
+        "поставщик данных. Не добавляй никаких префиксов или суффиксов от этой таблицы.\n\n"
         f"Колонки:\n{col_list}\n\n"
         'Ответь ТОЛЬКО JSON объектом вида:\n'
         '{"название_колонки": ["вар1", "вар2", "вар3", "вар4"], ...}\n'
@@ -176,25 +207,43 @@ def generate_synonyms(name: str, client: OllamaClient) -> None:
 
     log.info("[%s] %d колонок, домен: %s", name, len(feature_cols), domain)
 
+    # Определяем namespace-префикс (about., technical_specs. и т.п.)
+    ns_prefix = _detect_namespace_prefix(feature_cols)
+    if ns_prefix:
+        log.info("[%s] namespace-префикс: '%s' — будет убран при запросе к LLM", name, ns_prefix)
+
     # ── Синонимы имён колонок ──────────────────────────────────────
     new_cols = [c for c in feature_cols if c not in col_syns]
     if new_cols:
         log.info("[%s] генерируем синонимы для %d колонок...", name, len(new_cols))
-        # Батчим по MAX_COLS_PER_BATCH
         for batch_start in range(0, len(new_cols), MAX_COLS_PER_BATCH):
             batch = new_cols[batch_start: batch_start + MAX_COLS_PER_BATCH]
-            prompt = _col_synonyms_prompt(batch, domain)
+
+            # Стрипаем prefix перед отправкой в LLM: "about.Цвет" → "Цвет"
+            stripped_batch = [_strip_prefix(c, ns_prefix) for c in batch]
+            # Карта stripped → original (для случая коллизий при strip)
+            stripped_to_orig: dict[str, str] = {}
+            for orig, stripped in zip(batch, stripped_batch):
+                stripped_to_orig.setdefault(stripped, orig)
+
+            prompt = _col_synonyms_prompt(stripped_batch, domain)
             result = _llm_json(client, prompt)
-            for col in batch:
-                syns = result.get(col, [])
-                # Фильтруем: синонимы должны быть непустыми строками, не равными оригиналу
-                syns = [s for s in syns if isinstance(s, str) and s.strip() and s != col]
-                col_syns[col] = syns[:N_COL_SYNS]
+
+            for orig_col, stripped_col in zip(batch, stripped_batch):
+                syns = result.get(stripped_col, [])
+                # Фильтруем: непустые строки, не равные ни stripped-, ни original-имени
+                # Также стрипаем prefix если LLM всё равно его добавил
+                syns = [
+                    _strip_prefix(str(s).strip(), ns_prefix)
+                    for s in syns
+                    if isinstance(s, str) and str(s).strip()
+                ]
+                syns = [s for s in syns if s and s != orig_col and s != stripped_col]
+                col_syns[orig_col] = syns[:N_COL_SYNS]
                 if syns:
-                    log.info("  %s → %s", col, syns[:2])
+                    log.info("  %s → %s", orig_col, syns[:2])
                 else:
-                    log.warning("  %s → нет синонимов", col)
-            # Сохраняем прогресс после каждого батча
+                    log.warning("  %s → нет синонимов", orig_col)
             _save(out_path, col_syns, val_syns)
     else:
         log.info("[%s] синонимы колонок уже есть, пропускаем", name)
@@ -208,7 +257,8 @@ def generate_synonyms(name: str, client: OllamaClient) -> None:
         for col in new_cat_cols:
             vals = df[col].dropna().value_counts().head(MAX_UNIQUE_VALS).index.tolist()
             vals = [str(v) for v in vals]
-            prompt = _val_synonyms_prompt(col, vals, domain)
+            # Стрипаем prefix из имени колонки для контекста промпта
+            prompt = _val_synonyms_prompt(_strip_prefix(col, ns_prefix), vals, domain)
             result = _llm_json(client, prompt)
             col_val_map: dict[str, list] = {}
             for v in vals:
