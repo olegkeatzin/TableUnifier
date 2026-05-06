@@ -106,7 +106,7 @@ def corrupt_dataframe(
     Все столбцы приводятся к строковому типу, т.к. corrupt_value возвращает str.
     Столбцы из skip_columns (по умолчанию 'id') не портятся.
     """
-    noisy = df.astype(str).copy()
+    noisy = df.astype(str).copy().reset_index(drop=True)
     cols_to_corrupt = [c for c in noisy.columns if c not in skip_columns]
     for idx in noisy.index:
         if random.random() < row_prob:
