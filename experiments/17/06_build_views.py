@@ -128,14 +128,23 @@ def _apply_column_dropout(df: pd.DataFrame, drop_rate: float, rng: np.random.Gen
     return df.drop(columns=drop_cols)
 
 
+MIN_NOTNULL_FRAC = 0.05
+
+
 def _make_view(
     df: pd.DataFrame,
     synonyms: dict,
     rng: np.random.Generator,
     drop_rate: float = DROP_RATE,
     apply_corruption: bool = True,
+    min_notnull_frac: float = MIN_NOTNULL_FRAC,
 ) -> pd.DataFrame:
     """Один supplier view: synonyms → dropout → corruption."""
+    # Дропаем sparse колонки (кроме id) перед всем остальным
+    feat_cols = [c for c in df.columns if c != "id"]
+    dense_cols = [c for c in feat_cols if df[c].notna().mean() >= min_notnull_frac]
+    df = df[["id"] + dense_cols]
+
     view = _apply_synonyms(df, synonyms, rng)
     view = _apply_column_dropout(view, drop_rate, rng)
     if apply_corruption:
