@@ -107,10 +107,10 @@ def corrupt_dataframe(
     Столбцы из skip_columns (по умолчанию 'id') не портятся.
     """
     noisy = df.astype(str).copy().reset_index(drop=True)
-    cols_to_corrupt = [c for c in noisy.columns if c not in skip_columns]
-    for idx in noisy.index:
+    col_positions = [i for i, c in enumerate(noisy.columns) if c not in skip_columns]
+    for row_i in range(len(noisy)):
         if random.random() < row_prob:
-            noisy.loc[idx, cols_to_corrupt] = corrupt_row(
-                noisy.loc[idx, cols_to_corrupt], corruption_prob=cell_prob,
-            )
+            row_slice = noisy.iloc[row_i, col_positions]
+            corrupted = corrupt_row(row_slice, corruption_prob=cell_prob)
+            noisy.iloc[row_i, col_positions] = corrupted.values
     return noisy
