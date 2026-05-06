@@ -120,6 +120,14 @@ def _llm_json(client: OllamaClient, prompt: str, retries: int = 2) -> dict:
             result = _extract_json(raw)
             if isinstance(result, dict):
                 return result
+            # LLM иногда возвращает список dict-ов — мержим в один dict
+            if isinstance(result, list):
+                merged = {}
+                for item in result:
+                    if isinstance(item, dict):
+                        merged.update(item)
+                if merged:
+                    return merged
             log.warning("LLM вернул не dict (attempt %d): %s", attempt, str(raw)[:200])
         except Exception as exc:
             log.warning("LLM ошибка (attempt %d): %s", attempt, exc)
@@ -165,8 +173,9 @@ def _val_synonyms_prompt(col: str, vals: list[str], domain: str) -> str:
         "- НЕ меняй только регистр — это не вариант\n"
         "- Вариант должен называть ту же сущность, а не быть похожим словом\n\n"
         f"Значения:\n{val_list}\n\n"
-        f'Ответь ТОЛЬКО JSON объектом (строго {N_VAL_SYNS} элемента в каждом массиве):\n'
-        '{"значение": ["рус1", "рус2", "en_1"], ...}\n'
+        f'Ответь ТОЛЬКО JSON объектом (строго {N_VAL_SYNS} элемента в каждом массиве).\n'
+        f'Ключ = ТОЧНОЕ оригинальное значение из списка выше. Пример:\n'
+        f'{{"{vals[0]}": ["рус1", "рус2", "en_1"], "{vals[1] if len(vals) > 1 else vals[0]}": ["рус1", "рус2", "en_1"], ...}}\n'
         "Без пояснений. Только JSON."
     )
 
