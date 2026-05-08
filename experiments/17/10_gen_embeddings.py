@@ -25,6 +25,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
+from tqdm import tqdm
 
 from table_unifier.config import Config
 from table_unifier.dataset.download import DATASETS
@@ -161,7 +162,7 @@ def main() -> None:
     ollama_client = None if args.skip_columns else OllamaClient(config.ollama)
 
     ok = skip = 0
-    for name in all_names:
+    for name in tqdm(all_names, desc="datasets"):
         result = _embed_dataset(
             name,
             synth_base=synth_base / name,

@@ -27,6 +27,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
+from tqdm import tqdm
 
 from table_unifier.config import Config
 from table_unifier.dataset.data_split import split_rows_stratified
@@ -193,7 +194,7 @@ def main() -> None:
     # 2. Exp17 view-pair датасеты
     exp17_names = exp17_dataset_names(include_devices=args.include_devices)
     exp17_datasets = []
-    for name in exp17_names:
+    for name in tqdm(exp17_names, desc="exp17 datasets"):
         ds = load_dataset_for_graph(
             name, synth_base / name,
             columns_dir(config.data_dir, name),
