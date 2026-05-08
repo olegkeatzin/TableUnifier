@@ -48,6 +48,26 @@ cd experiments/17 && uv run python 04_synth_pairs.py --only auto_ru ozon    # в
 cd experiments/17 && uv run python 05_generate_synonyms.py    # LLM-синонимы колонок и значений (требует Ollama)
 cd experiments/17 && uv run python 06_build_views.py          # N=4 supplier views → C(4,2)=6 датасетов на источник
 cd experiments/17 && uv run python 06_build_views.py --only lamoda cars_ru  # выборочно
+
+# Exp 17 — обучение bge-m3 на view-pair данных (запускать на nvidia-server):
+# Шаг 1: генерация эмбеддингов для exp17 датасетов + Magellan (bge-m3 row + qwen3 column)
+uv run python -m experiments.17.10_gen_embeddings                        # всё
+uv run python -m experiments.17.10_gen_embeddings --skip-magellan        # только exp17
+uv run python -m experiments.17.10_gen_embeddings --skip-columns         # только row emb
+# Шаг 2: построение unified-графа (Magellan in-domain + exp17 view-pairs, без devices)
+uv run python -m experiments.17.11_build_graph                           # bge-m3, target-dim=1024
+uv run python -m experiments.17.11_build_graph --include-devices         # включить trivial devices
+# Шаг 3: обучение GAT (ntxent или bce)
+uv run python -m experiments.17.12_train                                 # ntxent, 500 эпох
+uv run python -m experiments.17.12_train --loss bce --patience 30
+# Eval: real data (требует пересборки графа с bge-m3)
+uv run python -m experiments.07_real_data_test \
+    --row-model-name BAAI/bge-m3 --target-col-dim 1024 \
+    --output-dir output/07_real_data_test_bge-m3 --trust-remote-code
+uv run python -m experiments.15_test_on_real_labels \
+    --model output/bge-m3/v17_views_gat_model.pt \
+    --mrl --target-dim 1024 --no-input-projection \
+    --graph-dir output/07_real_data_test_bge-m3
 ```
 
 ### Миграция существующих данных в namespace-раскладку

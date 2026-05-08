@@ -136,6 +136,8 @@ def generate_and_cache_embeddings(
     cols_b: list[str],
     ollama_config: OllamaConfig,
     device: str,
+    row_model_name: str = "cointegrated/rubert-tiny2",
+    trust_remote_code: bool = False,
 ) -> tuple[dict[str, np.ndarray], np.ndarray, np.ndarray]:
     """Сгенерировать col/row эмбеддинги, закешировать на диск."""
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -163,8 +165,12 @@ def generate_and_cache_embeddings(
         row_emb_a = np.load(row_a_path)
         row_emb_b = np.load(row_b_path)
     else:
-        logger.info("Генерация row embeddings через rubert-tiny2...")
-        embedder = TokenEmbedder(device=device)
+        logger.info("Генерация row embeddings (%s)...", row_model_name)
+        embedder = TokenEmbedder(
+            model_name=row_model_name,
+            trust_remote_code=trust_remote_code,
+            device=device,
+        )
 
         texts_a = [serialize_row(row, cols_a) for _, row in df_a.iterrows()]
         texts_b = [serialize_row(row, cols_b) for _, row in df_b.iterrows()]
@@ -198,8 +204,15 @@ def build_and_cache_graph(
     row_emb_a: np.ndarray,
     row_emb_b: np.ndarray,
     device: str,
+    row_model_name: str = "cointegrated/rubert-tiny2",
+    trust_remote_code: bool = False,
+    target_col_dim: int | None = None,
 ):
-    """Построить граф, закешировать."""
+    """Построить граф, закешировать.
+
+    target_col_dim: если задан, MRL-обрезает col_embeddings перед построением графа
+                    (нужно для bge-m3, где dim должна совпадать с row_dim=1024).
+    """
     graph_path = OUTPUT_DIR / "graph.pt"
     id_a_path = OUTPUT_DIR / "id_to_global_a.json"
     id_b_path = OUTPUT_DIR / "id_to_global_b.json"
@@ -213,8 +226,20 @@ def build_and_cache_graph(
             id_to_global_b = json.load(f)
         return graph, id_to_global_a, id_to_global_b
 
+    if target_col_dim is not None:
+        logger.info("MRL truncate col_embeddings: %d → %d",
+                    next(iter(col_embeddings.values())).shape[0], target_col_dim)
+        col_embeddings = {
+            k: (lambda t: t / (np.linalg.norm(t) + 1e-12))(v[:target_col_dim].astype(np.float32))
+            for k, v in col_embeddings.items()
+        }
+
     logger.info("Построение графа...")
-    token_embedder = TokenEmbedder(device=device)
+    token_embedder = TokenEmbedder(
+        model_name=row_model_name,
+        trust_remote_code=trust_remote_code,
+        device=device,
+    )
 
     graph, id_to_global_a, id_to_global_b = build_graph(
         df_a, df_b,
@@ -576,7 +601,22 @@ def main() -> None:
     parser.add_argument("--skip-graph", action="store_true",
                         help="Не строить граф (загрузить из кеша)")
     parser.add_argument("--ollama-host", default="http://localhost:11434")
+    # Поддержка альтернативных row-моделей (например bge-m3 для exp17)
+    parser.add_argument("--row-model-name", default="cointegrated/rubert-tiny2",
+                        help="HF-имя row-модели (по умолч. rubert-tiny2)")
+    parser.add_argument("--trust-remote-code", action="store_true")
+    parser.add_argument("--target-col-dim", type=int, default=None,
+                        help="MRL-обрезка col_embeddings перед построением графа "
+                             "(нужно для bge-m3: --target-col-dim 1024)")
+    parser.add_argument("--output-dir", default=None, type=Path,
+                        help="Каталог вывода (по умолч. output/07_real_data_test). "
+                             "Используй для изоляции разных моделей, напр. "
+                             "output/07_real_data_test_bge-m3")
     args = parser.parse_args()
+
+    global OUTPUT_DIR
+    if args.output_dir is not None:
+        OUTPUT_DIR = args.output_dir
 
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -595,6 +635,8 @@ def main() -> None:
         ollama_cfg = OllamaConfig(host=args.ollama_host)
         col_embeddings, row_emb_a, row_emb_b = generate_and_cache_embeddings(
             df_a, df_b, cols_a, cols_b, ollama_cfg, device,
+            row_model_name=args.row_model_name,
+            trust_remote_code=args.trust_remote_code,
         )
 
     # 3. Граф
@@ -609,6 +651,9 @@ def main() -> None:
         graph, id_to_global_a, id_to_global_b = build_and_cache_graph(
             df_a, df_b, cols_a, cols_b,
             col_embeddings, row_emb_a, row_emb_b, device,
+            row_model_name=args.row_model_name,
+            trust_remote_code=args.trust_remote_code,
+            target_col_dim=args.target_col_dim,
         )
 
     # 4. Модель

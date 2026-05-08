@@ -388,28 +388,32 @@ def main() -> None:
     parser.add_argument("--arch", choices=["gnn", "gat"], default="gat",
                         help="Архитектура backbone (по умолч. gat)")
     parser.add_argument("--mrl", action="store_true",
-                        help="MRL-обрезать col_embeddings перед инференсом (для v14)")
+                        help="MRL-обрезать col_embeddings перед инференсом (для v14/v17)")
     parser.add_argument("--target-dim", type=int, default=312,
-                        help="Размер MRL-обрезки (default 312 = rubert hidden)")
+                        help="Размер MRL-обрезки (312 для rubert, 1024 для bge-m3)")
     parser.add_argument("--no-input-projection", action="store_true",
-                        help="Для v14 MRL: модель без row/token/edge проекций")
+                        help="Для v14/v17 MRL: модель без row/token/edge проекций")
     parser.add_argument("--device", default=None)
+    parser.add_argument("--graph-dir", type=Path, default=None,
+                        help="Каталог с кешированным графом (по умолч. output/07_real_data_test). "
+                             "Для bge-m3: output/07_real_data_test_bge-m3")
     parser.add_argument("--out-json", type=Path, default=None,
                         help="Куда сохранить результаты (по умолч. рядом с моделью)")
     args = parser.parse_args()
 
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
+    graph_dir = args.graph_dir if args.graph_dir is not None else GRAPH_DIR
 
     # 1. trusted-метки
     trusted = load_trusted_pairs()
     nom12_to_nom07, spec12_to_spec07 = build_idx_maps()
 
-    # 2. cached real-data graph (exp 07)
-    logger.info("Загрузка кэшированного графа из %s", GRAPH_DIR)
-    graph = torch.load(GRAPH_DIR / "graph.pt", weights_only=False)
-    with open(GRAPH_DIR / "id_to_global_a.json") as f:
+    # 2. cached real-data graph (exp 07 или bge-m3 вариант)
+    logger.info("Загрузка кэшированного графа из %s", graph_dir)
+    graph = torch.load(graph_dir / "graph.pt", weights_only=False)
+    with open(graph_dir / "id_to_global_a.json") as f:
         id_to_global_a = json.load(f)
-    with open(GRAPH_DIR / "id_to_global_b.json") as f:
+    with open(graph_dir / "id_to_global_b.json") as f:
         id_to_global_b = json.load(f)
     logger.info("Граф: %d row, %d token, col_dim=%d",
                 graph["row"].x.shape[0], graph["token"].x.shape[0],
