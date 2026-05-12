@@ -8,17 +8,20 @@ from table_unifier.config import OllamaConfig
 
 logger = logging.getLogger(__name__)
 
+# Таймаут на один запрос: генерация LLM может занимать до ~2 минут
+_DEFAULT_TIMEOUT = 180.0
+
 
 class OllamaClient:
     """Обёртка над ollama.Client для генерации текста и эмбеддингов."""
 
-    def __init__(self, config: OllamaConfig | None = None):
+    def __init__(self, config: OllamaConfig | None = None, timeout: float = _DEFAULT_TIMEOUT):
         config = config or OllamaConfig()
-        self.client = ollama.Client(host=config.host)
+        self.client = ollama.Client(host=config.host, timeout=timeout)
         self.llm_model = config.llm_model
         self.embedding_model = config.embedding_model
-        logger.info("Ollama client: host=%s, llm=%s, embed=%s",
-                     config.host, self.llm_model, self.embedding_model)
+        logger.info("Ollama client: host=%s, llm=%s, embed=%s, timeout=%.0fs",
+                     config.host, self.llm_model, self.embedding_model, timeout)
 
     # ------------------------------------------------------------------ #
     #  Генерация текста (LLM)

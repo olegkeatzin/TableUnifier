@@ -89,16 +89,36 @@ def _embed_dataset(
     # column embeddings (qwen3, shared)
     ca_path = col_ds_dir / "column_embeddings_a.npz"
     cb_path = col_ds_dir / "column_embeddings_b.npz"
-    if skip_existing and ca_path.exists() and cb_path.exists():
-        logger.info("[%s] column emb уже есть — пропуск", name)
-    elif ollama_client is not None:
-        logger.info("[%s] column embeddings …", name)
-        emb_a = generate_column_embeddings(ollama_client, table_a, cols_a)
-        emb_b = generate_column_embeddings(ollama_client, table_b, cols_b)
-        np.savez(ca_path, **emb_a)
-        np.savez(cb_path, **emb_b)
-        pd.DataFrame({"col": cols_a}).to_csv(col_ds_dir / "columns_a.csv", index=False)
-        pd.DataFrame({"col": cols_b}).to_csv(col_ds_dir / "columns_b.csv", index=False)
+    if ollama_client is None:
+        pass  # --skip-columns
+    else:
+        def _load_existing(path: Path) -> dict:
+            return dict(np.load(path)) if path.exists() else {}
+
+        existing_a = _load_existing(ca_path)
+        existing_b = _load_existing(cb_path)
+
+        missing_a = [c for c in cols_a if c not in existing_a]
+        missing_b = [c for c in cols_b if c not in existing_b]
+
+        if skip_existing and not missing_a and not missing_b:
+            logger.info("[%s] column emb уже есть (все колонки) — пропуск", name)
+        else:
+            if missing_a or missing_b:
+                logger.info("[%s] column embeddings: A=%d missing, B=%d missing …",
+                            name, len(missing_a), len(missing_b))
+            else:
+                logger.info("[%s] column embeddings …", name)
+            emb_a = generate_column_embeddings(ollama_client, table_a, cols_a, existing=existing_a)
+            emb_b = generate_column_embeddings(ollama_client, table_b, cols_b, existing=existing_b)
+            np.savez(ca_path, **emb_a)
+            np.savez(cb_path, **emb_b)
+            pd.DataFrame({"col": cols_a}).to_csv(col_ds_dir / "columns_a.csv", index=False)
+            pd.DataFrame({"col": cols_b}).to_csv(col_ds_dir / "columns_b.csv", index=False)
+            failed_a = [c for c in cols_a if c not in emb_a]
+            failed_b = [c for c in cols_b if c not in emb_b]
+            if failed_a or failed_b:
+                logger.warning("[%s] не получены эмбеддинги: A=%s B=%s", name, failed_a, failed_b)
 
     # row embeddings (per model_tag)
     ra_path = row_ds_dir / "row_embeddings_a.npy"

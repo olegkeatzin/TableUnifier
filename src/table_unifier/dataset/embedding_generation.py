@@ -56,10 +56,14 @@ def _describe_column(
     prompt = COLUMN_DESCRIPTION_PROMPT.format(
         col_name=col_name, type_info=type_info, sample=sample,
     )
-    for _ in range(3):
-        description = client.generate(prompt)
-        if description.strip():
-            return description.strip()
+    for attempt in range(3):
+        try:
+            description = client.generate(prompt)
+            if description.strip():
+                return description.strip()
+        except Exception as e:
+            logger.warning("  col '%s': ошибка LLM (попытка %d/3): %s", col_name, attempt + 1, e)
+    logger.warning("  col '%s': fallback → используем имя колонки как описание", col_name)
     return col_name
 
 
@@ -67,19 +71,40 @@ def generate_column_embeddings(
     client: OllamaClient,
     df: pd.DataFrame,
     columns: list[str] | None = None,
+    existing: dict[str, np.ndarray] | None = None,
 ) -> dict[str, np.ndarray]:
     """Для каждого столбца: описание → embedding.
 
+    Args:
+        existing: уже готовые эмбеддинги (например, загруженные из npz).
+            Колонки из этого словаря пропускаются — эмбеддируются только новые.
+
     Returns:
-        ``{col_name: np.ndarray[4096]}``.
+        ``{col_name: np.ndarray[4096]}``. Включает все existing + новые.
+        Колонки, для которых не удалось получить эмбеддинг, пропускаются.
     """
     columns = columns or [c for c in df.columns if c != "id"]
-    result: dict[str, np.ndarray] = {}
-    for col in tqdm(columns, desc="Column embeddings"):
+    result: dict[str, np.ndarray] = dict(existing) if existing else {}
+
+    todo = [c for c in columns if c not in result]
+    if not todo:
+        return result
+    if existing:
+        logger.info("  доэмбеддивание %d/%d колонок (остальные уже есть)", len(todo), len(columns))
+
+    n_failed = 0
+    for col in tqdm(todo, desc="Column embeddings"):
         description = _describe_column(client, col, df)
-        vec = client.embed(description)
-        result[col] = np.array(vec, dtype=np.float32)
-        logger.debug("  col '%s' → описание: %s", col, description[:60])
+        try:
+            vec = client.embed(description)
+            result[col] = np.array(vec, dtype=np.float32)
+            logger.debug("  col '%s' → описание: %s", col, description[:60])
+        except Exception as e:
+            logger.error("  col '%s': ошибка embed — пропускаем колонку. %s", col, e)
+            n_failed += 1
+    if n_failed:
+        logger.warning("generate_column_embeddings: %d/%d колонок пропущено из-за ошибок",
+                       n_failed, len(todo))
     return result
 
 
