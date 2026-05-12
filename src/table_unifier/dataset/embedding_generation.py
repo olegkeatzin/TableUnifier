@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -62,7 +63,10 @@ def _describe_column(
             if description.strip():
                 return description.strip()
         except Exception as e:
-            logger.warning("  col '%s': ошибка LLM (попытка %d/3): %s", col_name, attempt + 1, e)
+            logger.warning("  col '%s': ошибка LLM (попытка %d/3): %s: %s",
+                           col_name, attempt + 1, type(e).__name__, e)
+            if attempt < 2:
+                time.sleep(10 * (attempt + 1))  # 10s, 20s — даём модели время загрузиться
     logger.warning("  col '%s': fallback → используем имя колонки как описание", col_name)
     return col_name
 

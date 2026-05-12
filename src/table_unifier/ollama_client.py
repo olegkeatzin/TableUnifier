@@ -2,26 +2,43 @@
 
 import logging
 
+import httpx
 import ollama
 
 from table_unifier.config import OllamaConfig
 
 logger = logging.getLogger(__name__)
 
-# Таймаут на один запрос: генерация LLM может занимать до ~2 минут
-_DEFAULT_TIMEOUT = 180.0
+# Таймаут на один запрос: учитываем возможную перезагрузку модели (~1-2 мин)
+# плюс время генерации. 10 минут — безопасный запас для A100.
+_DEFAULT_TIMEOUT = 600.0
+
+# Размер контекста модели. У qwen3.5:9b дефолт 262144 (256k) → 9 GiB KV cache,
+# но для наших коротких промптов (описание колонки) достаточно 4k.
+# Урезание контекста ускоряет prompt processing в разы.
+_DEFAULT_NUM_CTX = 4096
 
 
 class OllamaClient:
     """Обёртка над ollama.Client для генерации текста и эмбеддингов."""
 
-    def __init__(self, config: OllamaConfig | None = None, timeout: float = _DEFAULT_TIMEOUT):
+    def __init__(
+        self,
+        config: OllamaConfig | None = None,
+        timeout: float = _DEFAULT_TIMEOUT,
+        num_ctx: int = _DEFAULT_NUM_CTX,
+    ):
         config = config or OllamaConfig()
-        self.client = ollama.Client(host=config.host, timeout=timeout)
+        self.client = ollama.Client(host=config.host)
+        # Устанавливаем таймаут напрямую на httpx-клиент — надёжнее, чем kwarg,
+        # т.к. разные версии ollama по-разному его пробрасывают.
+        self.client._client.timeout = httpx.Timeout(timeout)
         self.llm_model = config.llm_model
         self.embedding_model = config.embedding_model
-        logger.info("Ollama client: host=%s, llm=%s, embed=%s, timeout=%.0fs",
-                     config.host, self.llm_model, self.embedding_model, timeout)
+        self.num_ctx = num_ctx
+        actual = self.client._client.timeout
+        logger.info("Ollama client: host=%s, llm=%s, embed=%s, timeout=%s, num_ctx=%d",
+                     config.host, self.llm_model, self.embedding_model, actual, num_ctx)
 
     # ------------------------------------------------------------------ #
     #  Генерация текста (LLM)
@@ -30,7 +47,10 @@ class OllamaClient:
     def generate(self, prompt: str, model: str | None = None) -> str:
         """Генерация текста через LLM."""
         model = model or self.llm_model
-        response = self.client.generate(model=model, prompt=prompt)
+        response = self.client.generate(
+            model=model, prompt=prompt,
+            options={"num_ctx": self.num_ctx},
+        )
         return response.response
 
     # ------------------------------------------------------------------ #
