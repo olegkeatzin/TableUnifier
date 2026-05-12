@@ -72,12 +72,17 @@ def generate_column_embeddings(
     df: pd.DataFrame,
     columns: list[str] | None = None,
     existing: dict[str, np.ndarray] | None = None,
+    embed_batch_size: int = 32,
 ) -> dict[str, np.ndarray]:
-    """Для каждого столбца: описание → embedding.
+    """Для каждого столбца: описание (LLM) → embedding (батч).
+
+    Описания генерируются по одному (Ollama не параллелит LLM-вызовы).
+    Embedding-запросы отправляются батчами для снижения числа HTTP round-trips.
 
     Args:
         existing: уже готовые эмбеддинги (например, загруженные из npz).
             Колонки из этого словаря пропускаются — эмбеддируются только новые.
+        embed_batch_size: сколько описаний отправлять в одном embed_batch запросе.
 
     Returns:
         ``{col_name: np.ndarray[4096]}``. Включает все existing + новые.
@@ -92,16 +97,34 @@ def generate_column_embeddings(
     if existing:
         logger.info("  доэмбеддивание %d/%d колонок (остальные уже есть)", len(todo), len(columns))
 
+    # Шаг 1: LLM-описания — последовательно (Ollama ограничение)
+    descriptions: list[tuple[str, str]] = []  # (col_name, description)
+    for col in tqdm(todo, desc="Column descriptions"):
+        desc = _describe_column(client, col, df)
+        descriptions.append((col, desc))
+        logger.debug("  col '%s' → %s", col, desc[:60])
+
+    # Шаг 2: embedding батчами
     n_failed = 0
-    for col in tqdm(todo, desc="Column embeddings"):
-        description = _describe_column(client, col, df)
+    for batch_start in tqdm(range(0, len(descriptions), embed_batch_size),
+                            desc="Column embed batches", unit="batch"):
+        batch = descriptions[batch_start: batch_start + embed_batch_size]
+        cols_batch = [c for c, _ in batch]
+        texts_batch = [d for _, d in batch]
         try:
-            vec = client.embed(description)
-            result[col] = np.array(vec, dtype=np.float32)
-            logger.debug("  col '%s' → описание: %s", col, description[:60])
+            vecs = client.embed_batch(texts_batch)
+            for col, vec in zip(cols_batch, vecs):
+                result[col] = np.array(vec, dtype=np.float32)
         except Exception as e:
-            logger.error("  col '%s': ошибка embed — пропускаем колонку. %s", col, e)
-            n_failed += 1
+            logger.error("embed_batch failed для %s: %s — пробуем по одному", cols_batch, e)
+            for col, text in batch:
+                try:
+                    vec = client.embed(text)
+                    result[col] = np.array(vec, dtype=np.float32)
+                except Exception as e2:
+                    logger.error("  col '%s': ошибка embed — пропускаем. %s", col, e2)
+                    n_failed += 1
+
     if n_failed:
         logger.warning("generate_column_embeddings: %d/%d колонок пропущено из-за ошибок",
                        n_failed, len(todo))
