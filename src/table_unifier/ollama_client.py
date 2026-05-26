@@ -44,13 +44,37 @@ class OllamaClient:
     #  Генерация текста (LLM)
     # ------------------------------------------------------------------ #
 
-    def generate(self, prompt: str, model: str | None = None) -> str:
-        """Генерация текста через LLM."""
+    def generate(
+        self,
+        prompt: str,
+        model: str | None = None,
+        *,
+        num_predict: int | None = None,
+        temperature: float | None = None,
+        keep_alive: str | None = None,
+        extra_options: dict | None = None,
+    ) -> str:
+        """Генерация текста через LLM.
+
+        Args:
+            num_predict: жёсткий лимит токенов на выход. Очень сильно влияет на
+                время — для коротких описаний достаточно ~80.
+            temperature: 0.0 — детерминированный greedy decoding, быстрее sampling.
+            keep_alive: как долго держать модель в VRAM после запроса (например, "30m").
+                По дефолту Ollama выгружает через 5 минут idle.
+        """
         model = model or self.llm_model
-        response = self.client.generate(
-            model=model, prompt=prompt,
-            options={"num_ctx": self.num_ctx},
-        )
+        options: dict = {"num_ctx": self.num_ctx}
+        if num_predict is not None:
+            options["num_predict"] = num_predict
+        if temperature is not None:
+            options["temperature"] = temperature
+        if extra_options:
+            options.update(extra_options)
+        kwargs: dict = {"model": model, "prompt": prompt, "options": options}
+        if keep_alive is not None:
+            kwargs["keep_alive"] = keep_alive
+        response = self.client.generate(**kwargs)
         return response.response
 
     # ------------------------------------------------------------------ #

@@ -26,14 +26,9 @@ logger = logging.getLogger(__name__)
 #  Промпт для описания столбца (из заметок Obsidian)
 # ------------------------------------------------------------------ #
 COLUMN_DESCRIPTION_PROMPT = (
-    "Дай краткое описание для столбца таблицы с названием '{col_name}'.{type_info}\n"
-    "Если по названию не понятно, что это за столбец, попробуй угадать "
-    "на основе содержимого: {sample}.\n"
-    "Описание должно быть универсальным, чтобы подходить для любых "
-    "значений в этом столбце.\n"
-    "Если столбец описывает что-то конкретное, думай шире — в столбце "
-    "могут быть более разнообразные данные.\n"
-    "Выведи только описание и ничего больше. /no_think"
+    "Столбец '{col_name}'.{type_info} Примеры значений: {sample}.\n"
+    "Опиши одной короткой фразой (до 12 слов), что хранится в этом столбце. "
+    "Только описание, без префиксов и пояснений."
 )
 
 
@@ -59,9 +54,18 @@ def _describe_column(
     )
     for attempt in range(3):
         try:
-            description = client.generate(prompt)
+            description = client.generate(
+                prompt,
+                num_predict=80,        # хватит на короткое описание
+                temperature=0.0,       # greedy → быстрее
+                keep_alive="30m",      # не выгружать модель между колонками
+            )
             if description.strip():
-                return description.strip()
+                # на всякий случай режем reasoning-блоки thinking-моделей
+                d = description.strip()
+                if "</think>" in d:
+                    d = d.split("</think>", 1)[1].strip()
+                return d
         except Exception as e:
             logger.warning("  col '%s': ошибка LLM (попытка %d/3): %s: %s",
                            col_name, attempt + 1, type(e).__name__, e)
