@@ -24,6 +24,16 @@ uv run pytest -k "test_triplet"        # Single test by name
 uv run python _integration_test.py    # End-to-end integration test (requires Ollama)
 ```
 
+### Веб-приложение (инференс)
+```bash
+# FastAPI + статика фронта на http://localhost:8000
+uv run python -m table_unifier.server.main --host 0.0.0.0 --port 8000
+```
+Требует Ollama по адресу `OllamaConfig.host` (для column embeddings qwen3-embedding:8b)
+и чекпоинт `output/bge-m3/v14_mrl_gat_model.pt` (+ опц. `.config.json` рядом с ним).
+Фронт раздаётся из `src/table_unifier/server/static/` (HTML+React через CDN, без сборки).
+Серверный код изолирован в `src/table_unifier/server/`, остальной pipeline не трогает.
+
 ### Running Experiments
 ```bash
 # Основные эксперименты

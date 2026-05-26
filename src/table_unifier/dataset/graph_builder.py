@@ -247,6 +247,12 @@ def build_graph(
         col_emb_matrix.shape[0],
     )
 
+    # Сохраняем оригинальные BPE-токен-ID и имена столбцов как атрибуты —
+    # это позволяет потом (например, в веб-визуализации) восстановить
+    # человекочитаемые подписи токенов через tokenizer.decode.
+    data.token_ids = list(token_ids_list)
+    data.col_names = [c for c, _ in sorted(col_to_idx.items(), key=lambda kv: kv[1])]
+
     return data, id_to_global_a, id_to_global_b
 
 
