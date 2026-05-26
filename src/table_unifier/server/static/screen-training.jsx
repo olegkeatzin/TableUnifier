@@ -88,6 +88,15 @@ function ScreenTraining({ onContinue, onBack }) {
   };
 
   useEffect(() => {
+    // Если граф ещё не загружен в память (например, после перезагрузки страницы),
+    // подтянем его из API чтобы отобразить в HeteroGraph и EmbeddingSpace.
+    const rid = window.__STATE__.runId;
+    if (rid && (!window.__DATA__.graph || !window.__DATA__.graph.rows)) {
+      window.API.getGraph(rid).catch(() => {/* граф может быть ещё не готов */});
+    }
+  }, []);
+
+  useEffect(() => {
     startInference();
     return () => { if (wsRef.current) wsRef.current.close(); };
   }, []);
