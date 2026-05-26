@@ -112,7 +112,7 @@ def train_entity_resolution(
                     save_path.parent.mkdir(parents=True, exist_ok=True)
                     torch.save(model.state_dict(), save_path)
 
-        if epoch % 5 == 0 or epoch == 1:
+        if True:  # log every epoch
             logger.info(
                 "ER Epoch %d/%d — train_loss=%.4f%s",
                 epoch, config.epochs, train_loss, val_info,
@@ -279,7 +279,7 @@ def train_entity_resolution_multidataset(
         history["lr"].append(current_lr)
 
         val_info = f", val_loss={val_loss:.4f}" if val_loss is not None else ""
-        if epoch % 5 == 0 or epoch == 1:
+        if True:  # log every epoch
             logger.info(
                 "ER [multi] Epoch %d/%d — train_loss=%.4f%s, lr=%.2e (%d datasets)",
                 epoch, config.epochs, train_loss, val_info, current_lr, len(datasets),
@@ -449,7 +449,9 @@ def train_entity_resolution_minibatch(
         epoch_loss = 0.0
         n_batches = 0
 
-        for batch in loader:
+        pbar = tqdm(loader, desc=f"Ep {epoch} train", unit="batch",
+                    dynamic_ncols=True, leave=False)
+        for batch in pbar:
             batch = batch.to(device)
 
             with torch.amp.autocast("cuda", enabled=use_amp):
@@ -486,6 +488,7 @@ def train_entity_resolution_minibatch(
 
             epoch_loss += loss.item()
             n_batches += 1
+            pbar.set_postfix(loss=f"{epoch_loss / n_batches:.4f}")
             batch.to("cpu")
             torch.cuda.empty_cache()
 
@@ -508,7 +511,8 @@ def train_entity_resolution_minibatch(
             val_count = 0
 
             with torch.no_grad():
-                for batch in val_loader:
+                for batch in tqdm(val_loader, desc=f"Ep {epoch} val", unit="batch",
+                                  dynamic_ncols=True, leave=False):
                     batch = batch.to(device)
                     with torch.amp.autocast("cuda", enabled=use_amp):
                         val_all_emb = model(batch)
@@ -546,7 +550,7 @@ def train_entity_resolution_minibatch(
         history["lr"].append(current_lr)
 
         val_info = f", val_loss={val_loss:.4f}" if val_loss is not None else ""
-        if epoch % 5 == 0 or epoch == 1:
+        if True:  # log every epoch
             logger.info("ER [minibatch] Epoch %d/%d — train_loss=%.4f%s, lr=%.2e",
                         epoch, config.epochs, train_loss, val_info, current_lr)
 
@@ -685,7 +689,9 @@ def train_entity_resolution_bce(
         epoch_loss = 0.0
         n_batches = 0
 
-        for batch in loader:
+        pbar = tqdm(loader, desc=f"Ep {epoch} train", unit="batch",
+                    dynamic_ncols=True, leave=False)
+        for batch in pbar:
             batch = batch.to(device)
 
             # Seed-строки (BCE использует все пары, не только pos)
@@ -722,6 +728,7 @@ def train_entity_resolution_bce(
 
             epoch_loss += loss.item()
             n_batches += 1
+            pbar.set_postfix(loss=f"{epoch_loss / n_batches:.4f}")
             batch.to("cpu")
             torch.cuda.empty_cache()
 
@@ -744,7 +751,8 @@ def train_entity_resolution_bce(
             val_count = 0
 
             with torch.no_grad():
-                for batch in val_loader:
+                for batch in tqdm(val_loader, desc=f"Ep {epoch} val", unit="batch",
+                                  dynamic_ncols=True, leave=False):
                     batch = batch.to(device)
                     n_seeds = batch["row"].batch_size
                     seed_n_ids = batch["row"].n_id[:n_seeds]
@@ -784,7 +792,7 @@ def train_entity_resolution_bce(
         history["lr"].append(current_lr)
 
         val_info = f", val_loss={val_loss:.4f}" if val_loss is not None else ""
-        if epoch % 5 == 0 or epoch == 1:
+        if True:  # log every epoch
             logger.info("ER [BCE] Epoch %d/%d — train_loss=%.4f%s, lr=%.2e",
                         epoch, config.epochs, train_loss, val_info, current_lr)
 
