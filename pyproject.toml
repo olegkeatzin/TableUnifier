@@ -39,14 +39,8 @@ dependencies = [
 ]
 
 [tool.uv.sources]
-pyg-lib = { index = "pyg" }
-torch-sparse = { index = "pyg" }
-
-[[tool.uv.index]]
-name = "pyg"
-url = "https://data.pyg.org/whl/torch-2.9.0+cu128.html"
-format = "flat"
-explicit = true
+pyg-lib = { path = "wheels/pyg_lib-0.6.0+pt29cu128-cp312-cp312-manylinux_2_28_x86_64.whl" }
+torch-sparse = { path = "wheels/torch_sparse-0.6.18+pt29cu128-cp312-cp312-linux_x86_64.whl" }
 
 [build-system]
 requires = ["hatchling"]
