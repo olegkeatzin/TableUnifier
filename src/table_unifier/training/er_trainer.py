@@ -423,6 +423,12 @@ def train_entity_resolution_minibatch(
     use_amp = device != "cpu"
     scaler = torch.amp.GradScaler(enabled=use_amp)
 
+    # Предкомпьют для быстрой выборки batch_pos: тензоры на GPU (а не tolist + Python loop).
+    # torch.isin + searchsorted на каждом батче работают в C, а не в Python.
+    # 1.45M × int64 = ~12 MB, копеечный расход VRAM.
+    train_pos_a = train_pos_pairs[:, 0].contiguous().to(device)
+    train_pos_b = train_pos_pairs[:, 1].contiguous().to(device)
+
     best_val_loss = float("inf")
     history: dict[str, list] = {"train_loss": [], "val_loss": [], "lr": []}
 
@@ -437,13 +443,16 @@ def train_entity_resolution_minibatch(
         else:
             scheduler.step(epoch - warmup_epochs)
 
-        # NeighborLoader для подграфа
+        # NeighborLoader для подграфа.
+        # num_workers > 0 → параллельное сэмплирование (pyg-lib потоки).
         loader = NeighborLoader(
             graph,
             num_neighbors=num_neighbors,
             input_nodes=("row", all_train_rows),
             batch_size=min(config.batch_size, len(all_train_rows)),
             shuffle=True,
+            num_workers=4,
+            persistent_workers=True,
         )
 
         epoch_loss = 0.0
@@ -462,20 +471,19 @@ def train_entity_resolution_minibatch(
                 seed_embeddings = all_embeddings[:n_seeds]
                 seed_n_ids = batch["row"].n_id[:n_seeds]
 
-                # Маппинг: global row idx → local idx среди seed-строк
-                seed_to_local = {gid.item(): local for local, gid in enumerate(seed_n_ids)}
-
-                # Фильтруем позитивные пары где обе строки — seeds
-                batch_pos = []
-                for a, p in train_pos_pairs.tolist():
-                    if a in seed_to_local and p in seed_to_local:
-                        batch_pos.append([seed_to_local[a], seed_to_local[p]])
-
-                if not batch_pos:
-                    batch.to("cpu")
+                # Векторизованная выборка пар (а,p), где оба конца — seeds.
+                # torch.isin + searchsorted в C, не Python.
+                sorted_seeds, sort_idx = torch.sort(seed_n_ids)
+                a_in = torch.isin(train_pos_a, sorted_seeds)
+                b_in = torch.isin(train_pos_b, sorted_seeds)
+                both = a_in & b_in
+                if not both.any():
                     continue
-
-                bp = torch.tensor(batch_pos, device=device)
+                pa = train_pos_a[both]
+                pb = train_pos_b[both]
+                a_local = sort_idx[torch.searchsorted(sorted_seeds, pa)]
+                b_local = sort_idx[torch.searchsorted(sorted_seeds, pb)]
+                bp = torch.stack([a_local, b_local], dim=1).to(device)
                 # NT-Xent по seed-строкам (~256), не по всему подграфу (~70K)
                 loss = nt_xent_loss(seed_embeddings, bp, temperature=config.temperature)
 
@@ -489,8 +497,6 @@ def train_entity_resolution_minibatch(
             epoch_loss += loss.item()
             n_batches += 1
             pbar.set_postfix(loss=f"{epoch_loss / n_batches:.4f}")
-            batch.to("cpu")
-            torch.cuda.empty_cache()
 
         train_loss = epoch_loss / max(n_batches, 1)
         history["train_loss"].append(train_loss)
@@ -505,10 +511,14 @@ def train_entity_resolution_minibatch(
                 input_nodes=("row", val_seed),
                 batch_size=min(512, len(val_seed)),
                 shuffle=False,
+                num_workers=4,
+                persistent_workers=True,
             )
 
             val_loss_sum = 0.0
             val_count = 0
+            val_pos_a = val_pos_pairs[:, 0].contiguous().to(device)
+            val_pos_b = val_pos_pairs[:, 1].contiguous().to(device)
 
             with torch.no_grad():
                 for batch in tqdm(val_loader, desc=f"Ep {epoch} val", unit="batch",
@@ -520,21 +530,20 @@ def train_entity_resolution_minibatch(
                     n_seeds = batch["row"].batch_size
                     val_seed_emb = val_all_emb[:n_seeds]
                     val_seed_ids = batch["row"].n_id[:n_seeds]
-                    seed_to_local = {gid.item(): local for local, gid in enumerate(val_seed_ids)}
 
-                    batch_val_pos = []
-                    for a, p in val_pos_pairs.tolist():
-                        if a in seed_to_local and p in seed_to_local:
-                            batch_val_pos.append([seed_to_local[a], seed_to_local[p]])
-
-                    if batch_val_pos:
-                        bvp = torch.tensor(batch_val_pos, device=device)
-                        vl = nt_xent_loss(val_seed_emb.float(), bvp, temperature=config.temperature)
-                        val_loss_sum += vl.item() * len(batch_val_pos)
-                        val_count += len(batch_val_pos)
-
-                    batch.to("cpu")
-                    torch.cuda.empty_cache()
+                    sorted_seeds, sort_idx = torch.sort(val_seed_ids)
+                    both = torch.isin(val_pos_a, sorted_seeds) & torch.isin(val_pos_b, sorted_seeds)
+                    if not both.any():
+                        continue
+                    pa = val_pos_a[both]
+                    pb = val_pos_b[both]
+                    a_local = sort_idx[torch.searchsorted(sorted_seeds, pa)]
+                    b_local = sort_idx[torch.searchsorted(sorted_seeds, pb)]
+                    bvp = torch.stack([a_local, b_local], dim=1)
+                    vl = nt_xent_loss(val_seed_emb.float(), bvp, temperature=config.temperature)
+                    n_pairs_b = bvp.shape[0]
+                    val_loss_sum += vl.item() * n_pairs_b
+                    val_count += n_pairs_b
 
             val_loss = val_loss_sum / max(val_count, 1) if val_count > 0 else None
 
@@ -664,6 +673,11 @@ def train_entity_resolution_bce(
     use_amp = device != "cpu"
     scaler = torch.amp.GradScaler(enabled=use_amp)
 
+    # Предкомпьют для векторизованной фильтрации пар.
+    tp_a = train_pairs[:, 0].contiguous().to(device)
+    tp_b = train_pairs[:, 1].contiguous().to(device)
+    tp_label = train_pairs[:, 2].to(torch.float32).contiguous().to(device)
+
     best_val_loss = float("inf")
     history: dict[str, list] = {"train_loss": [], "val_loss": [], "lr": []}
 
@@ -684,6 +698,8 @@ def train_entity_resolution_bce(
             input_nodes=("row", all_train_rows),
             batch_size=min(config.batch_size, len(all_train_rows)),
             shuffle=True,
+            num_workers=4,
+            persistent_workers=True,
         )
 
         epoch_loss = 0.0
@@ -697,23 +713,17 @@ def train_entity_resolution_bce(
             # Seed-строки (BCE использует все пары, не только pos)
             n_seeds = batch["row"].batch_size
             seed_n_ids = batch["row"].n_id[:n_seeds]
-            seed_to_local = {gid.item(): local for local, gid in enumerate(seed_n_ids)}
 
-            # Фильтруем пары где обе строки — seeds
-            batch_pairs_list = []
-            batch_labels_list = []
-            for row in train_pairs:
-                a, b, label = row[0].item(), row[1].item(), row[2].item()
-                if a in seed_to_local and b in seed_to_local:
-                    batch_pairs_list.append([seed_to_local[a], seed_to_local[b]])
-                    batch_labels_list.append(float(label))
-
-            if not batch_pairs_list:
-                batch.to("cpu")
+            sorted_seeds, sort_idx = torch.sort(seed_n_ids)
+            both = torch.isin(tp_a, sorted_seeds) & torch.isin(tp_b, sorted_seeds)
+            if not both.any():
                 continue
-
-            bp = torch.tensor(batch_pairs_list, device=device)
-            bl = torch.tensor(batch_labels_list, device=device)
+            pa = tp_a[both]
+            pb = tp_b[both]
+            a_local = sort_idx[torch.searchsorted(sorted_seeds, pa)]
+            b_local = sort_idx[torch.searchsorted(sorted_seeds, pb)]
+            bp = torch.stack([a_local, b_local], dim=1)
+            bl = tp_label[both]
 
             with torch.amp.autocast("cuda", enabled=use_amp):
                 preds = model(batch, bp)
@@ -729,8 +739,6 @@ def train_entity_resolution_bce(
             epoch_loss += loss.item()
             n_batches += 1
             pbar.set_postfix(loss=f"{epoch_loss / n_batches:.4f}")
-            batch.to("cpu")
-            torch.cuda.empty_cache()
 
         train_loss = epoch_loss / max(n_batches, 1)
         history["train_loss"].append(train_loss)
@@ -745,10 +753,15 @@ def train_entity_resolution_bce(
                 input_nodes=("row", val_seed),
                 batch_size=min(512, len(val_seed)),
                 shuffle=False,
+                num_workers=4,
+                persistent_workers=True,
             )
 
             val_loss_sum = 0.0
             val_count = 0
+            vp_a = val_pairs[:, 0].contiguous().to(device)
+            vp_b = val_pairs[:, 1].contiguous().to(device)
+            vp_label = val_pairs[:, 2].to(torch.float32).contiguous().to(device)
 
             with torch.no_grad():
                 for batch in tqdm(val_loader, desc=f"Ep {epoch} val", unit="batch",
@@ -756,27 +769,21 @@ def train_entity_resolution_bce(
                     batch = batch.to(device)
                     n_seeds = batch["row"].batch_size
                     seed_n_ids = batch["row"].n_id[:n_seeds]
-                    seed_to_local = {gid.item(): local for local, gid in enumerate(seed_n_ids)}
 
-                    batch_val_pairs = []
-                    batch_val_labels = []
-                    for row in val_pairs:
-                        a, b, label = row[0].item(), row[1].item(), row[2].item()
-                        if a in seed_to_local and b in seed_to_local:
-                            batch_val_pairs.append([seed_to_local[a], seed_to_local[b]])
-                            batch_val_labels.append(float(label))
-
-                    if batch_val_pairs:
-                        bvp = torch.tensor(batch_val_pairs, device=device)
-                        bvl = torch.tensor(batch_val_labels, device=device)
-                        with torch.amp.autocast("cuda", enabled=use_amp):
-                            preds = model(batch, bvp)
-                            vl = criterion(preds, bvl)
-                        val_loss_sum += vl.item() * len(batch_val_pairs)
-                        val_count += len(batch_val_pairs)
-
-                    batch.to("cpu")
-                    torch.cuda.empty_cache()
+                    sorted_seeds, sort_idx = torch.sort(seed_n_ids)
+                    both = torch.isin(vp_a, sorted_seeds) & torch.isin(vp_b, sorted_seeds)
+                    if not both.any():
+                        continue
+                    a_local = sort_idx[torch.searchsorted(sorted_seeds, vp_a[both])]
+                    b_local = sort_idx[torch.searchsorted(sorted_seeds, vp_b[both])]
+                    bvp = torch.stack([a_local, b_local], dim=1)
+                    bvl = vp_label[both]
+                    with torch.amp.autocast("cuda", enabled=use_amp):
+                        preds = model(batch, bvp)
+                        vl = criterion(preds, bvl)
+                    n_pairs_b = bvp.shape[0]
+                    val_loss_sum += vl.item() * n_pairs_b
+                    val_count += n_pairs_b
 
             val_loss = val_loss_sum / max(val_count, 1) if val_count > 0 else None
 
