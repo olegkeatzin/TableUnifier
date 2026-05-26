@@ -391,6 +391,8 @@ def run_inference(run_id: str, *,
     try:
         run.status = "infer"
         device = "cuda" if torch.cuda.is_available() else "cpu"
+        logger.info("[%s] inference thread started · device=%s · ckpt=%s",
+                    run_id, device, checkpoint)
 
         # PHASE: load
         _publish(run_id, {"type": "phase", "phase": "load",

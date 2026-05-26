@@ -36,7 +36,8 @@ function ScreenTraining({ onContinue, onBack }) {
     setLogs([]); setErrorMsg(null);
     const rid = window.__STATE__.runId;
     if (!rid) {
-      setErrorMsg('no run_id — need to build graph first');
+      setErrorMsg('Сессия потеряна (возможно, страница была перезагружена). '
+                  + 'Вернитесь к загрузке таблиц и постройте граф заново.');
       setPhase('error');
       return;
     }

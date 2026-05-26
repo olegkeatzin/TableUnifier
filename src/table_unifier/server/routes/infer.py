@@ -28,6 +28,8 @@ def run_infer(req: InferRequest) -> RunStartedResponse:
         raise HTTPException(404, detail="run not found")
     if run.graph is None:
         raise HTTPException(409, detail=f"graph not ready (status={run.status})")
+    logger.info("infer/run %s · checkpoint=%s · thr=%.3f",
+                req.run_id, req.checkpoint, req.similarity_threshold)
     launch_inference(
         req.run_id,
         checkpoint=req.checkpoint,

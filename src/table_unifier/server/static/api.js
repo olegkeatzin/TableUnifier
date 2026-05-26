@@ -15,11 +15,28 @@
   const BASE = ""; // same-origin
 
   // ---- состояние ----------------------------------------------------------
-  window.__STATE__ = {
-    sessionId: null,
-    runId: null,
-    graphReady: false,
-    inferDone: false,
+  // sessionStorage переживает F5 в той же вкладке; новый таб → чистая сессия.
+  const STATE_KEY = "tableunifier:state:v1";
+  const _defaults = {
+    sessionId: null, runId: null,
+    graphReady: false, inferDone: false, inferRunId: null,
+  };
+  let _saved = {};
+  try { _saved = JSON.parse(sessionStorage.getItem(STATE_KEY) || "{}"); }
+  catch (_e) { _saved = {}; }
+
+  window.__STATE__ = new Proxy({ ..._defaults, ..._saved }, {
+    set(t, k, v) {
+      t[k] = v;
+      try { sessionStorage.setItem(STATE_KEY, JSON.stringify(t)); }
+      catch (_e) { /* quota / private mode — игнорируем */ }
+      return true;
+    },
+  });
+  // Утилита для полного сброса (вызывается из app.jsx reset()).
+  window.__STATE_RESET__ = () => {
+    for (const k of Object.keys(_defaults)) window.__STATE__[k] = _defaults[k];
+    try { sessionStorage.removeItem(STATE_KEY); } catch (_e) { /* noop */ }
   };
 
   // плейсхолдер-таблицы пока ничего не загружено
