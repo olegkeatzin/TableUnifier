@@ -52,6 +52,7 @@ class OllamaClient:
         num_predict: int | None = None,
         temperature: float | None = None,
         keep_alive: str | None = None,
+        think: bool | None = None,
         extra_options: dict | None = None,
     ) -> str:
         """Генерация текста через LLM.
@@ -74,7 +75,16 @@ class OllamaClient:
         kwargs: dict = {"model": model, "prompt": prompt, "options": options}
         if keep_alive is not None:
             kwargs["keep_alive"] = keep_alive
-        response = self.client.generate(**kwargs)
+        if think is not None:
+            # ollama >= 0.5 поддерживает think=False для отключения reasoning
+            # у моделей вроде qwen3 / deepseek-r1. На старых клиентах падает —
+            # ловим TypeError и пробуем без него.
+            kwargs["think"] = think
+        try:
+            response = self.client.generate(**kwargs)
+        except TypeError:
+            kwargs.pop("think", None)
+            response = self.client.generate(**kwargs)
         return response.response
 
     # ------------------------------------------------------------------ #

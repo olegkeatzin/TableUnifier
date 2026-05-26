@@ -56,23 +56,41 @@ def _describe_column(
         try:
             description = client.generate(
                 prompt,
-                num_predict=80,        # хватит на короткое описание
-                temperature=0.0,       # greedy → быстрее
+                num_predict=256,       # запас на случай thinking-моделей
+                temperature=0.2,       # 0.0 иногда залипает в петлях у тюненных моделей
                 keep_alive="30m",      # не выгружать модель между колонками
+                think=False,           # отключаем reasoning у qwen3/deepseek-r1
             )
-            if description.strip():
-                # на всякий случай режем reasoning-блоки thinking-моделей
-                d = description.strip()
-                if "</think>" in d:
-                    d = d.split("</think>", 1)[1].strip()
+            d = (description or "").strip()
+            # Обработка thinking-моделей (qwen3, deepseek-r1 и т.п.):
+            # формат "<think>...</think>\n<answer>". Берём что после </think>.
+            # Если answer пустой (модель не успела дописать), вытаскиваем
+            # последнюю осмысленную строку из самого think-блока.
+            if "</think>" in d:
+                think, _, after = d.partition("</think>")
+                after = after.strip()
+                if after:
+                    d = after
+                else:
+                    # модель сгенерила только размышление — берём итоговую строку
+                    inside = think.replace("<think>", "").strip()
+                    lines = [ln.strip(" -•*") for ln in inside.splitlines() if ln.strip()]
+                    d = lines[-1] if lines else ""
+            if d:
                 return d
+            # ответ пустой — логируем сырой текст чтобы было видно почему
+            logger.warning("  col '%s': пустой ответ LLM (попытка %d/3). Raw: %r",
+                           col_name, attempt + 1, (description or "")[:200])
         except Exception as e:
             logger.warning("  col '%s': ошибка LLM (попытка %d/3): %s: %s",
                            col_name, attempt + 1, type(e).__name__, e)
             if attempt < 2:
                 time.sleep(10 * (attempt + 1))  # 10s, 20s — даём модели время загрузиться
-    logger.warning("  col '%s': fallback → используем имя колонки как описание", col_name)
-    return col_name
+    # Финальный fallback: собираем описание из имени колонки + примеров значений.
+    # Семантически богаче чем просто имя, для column embedder это даже полезно.
+    fb = f"{col_name}: {sample}" if sample else col_name
+    logger.warning("  col '%s': fallback → '%s'", col_name, fb[:80])
+    return fb
 
 
 def generate_column_embeddings(
