@@ -17,6 +17,7 @@ import numpy as np
 import pandas as pd
 import torch
 from torch_geometric.data import HeteroData
+from tqdm import tqdm
 
 from table_unifier.dataset.embedding_generation import TokenEmbedder, serialize_row
 
@@ -345,36 +346,63 @@ def build_unified_graph_from_datasets(
     col_emb_list: list[np.ndarray] = []
     col_to_idx: dict[str, int] = {}
 
-    for row_idx, (row, cols) in enumerate(zip(all_rows, all_row_columns)):
+    # Фаза 1: собираем все непустые ячейки в плоские списки (без токенизации).
+    # Это позволяет вызвать tokenizer одним батчем, а не 30M раз поштучно.
+    cell_row_idx: list[int] = []
+    cell_col_idx: list[int] = []
+    cell_texts: list[str] = []
+
+    for row_idx, (row, cols) in enumerate(
+        tqdm(zip(all_rows, all_row_columns), total=len(all_rows), desc="Collect cells")
+    ):
         for col in cols:
             val = row.get(col, "")
             if pd.isna(val) or not str(val).strip():
                 continue
-            cell_text = str(val)
-            tids = token_embedder.get_token_ids(cell_text)
-
             col_emb = merged_col_emb.get(col)
             if col_emb is None:
                 continue
-
             if col not in col_to_idx:
                 col_to_idx[col] = len(col_emb_list)
                 col_emb_list.append(col_emb)
-            cidx = col_to_idx[col]
+            cell_row_idx.append(row_idx)
+            cell_col_idx.append(col_to_idx[col])
+            cell_texts.append(str(val))
 
-            seen_in_cell: set[int] = set()
-            for tid in tids:
-                if tid in seen_in_cell:
-                    continue
-                seen_in_cell.add(tid)
+    logger.info("Собрано %d непустых ячеек для токенизации", len(cell_texts))
 
-                if tid not in token_vocab:
-                    token_vocab[tid] = len(token_ids_list)
-                    token_ids_list.append(tid)
-                token_node = token_vocab[tid]
+    # Фаза 2: батч-токенизация. Fast-tokenizer параллелится по rust-threads.
+    tok_batch = 4096
+    all_tids: list[list[int]] = []
+    for start in tqdm(range(0, len(cell_texts), tok_batch), desc="Tokenize cells"):
+        chunk = cell_texts[start: start + tok_batch]
+        enc = token_embedder.tokenizer(
+            chunk, add_special_tokens=False, truncation=True, max_length=2048,
+        )
+        all_tids.extend(enc["input_ids"])
 
-                raw_edges.append((token_node, row_idx, cidx))
-                token_row_sets[token_node].add(row_idx)
+    # Освобождаем тексты — больше не нужны
+    del cell_texts
+
+    # Фаза 3: построение raw_edges + token_row_sets
+    for row_idx, cidx, tids in zip(
+        tqdm(cell_row_idx, desc="Build edges"), cell_col_idx, all_tids
+    ):
+        seen_in_cell: set[int] = set()
+        for tid in tids:
+            if tid in seen_in_cell:
+                continue
+            seen_in_cell.add(tid)
+
+            if tid not in token_vocab:
+                token_vocab[tid] = len(token_ids_list)
+                token_ids_list.append(tid)
+            token_node = token_vocab[tid]
+
+            raw_edges.append((token_node, row_idx, cidx))
+            token_row_sets[token_node].add(row_idx)
+
+    del cell_row_idx, cell_col_idx, all_tids
 
     # Глобальная IDF-фильтрация
     n_raw_edges = len(raw_edges)

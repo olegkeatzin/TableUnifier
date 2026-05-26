@@ -38,8 +38,8 @@ def _build_components(pairs: torch.Tensor) -> list[set[int]]:
         if ra != rb:
             parent[ra] = rb
 
-    for row in pairs:
-        a, b = row[0].item(), row[1].item()
+    pairs_np = pairs.numpy() if isinstance(pairs, torch.Tensor) else np.asarray(pairs)
+    for a, b in pairs_np[:, :2].tolist():
         parent.setdefault(a, a)
         parent.setdefault(b, b)
         union(a, b)
@@ -67,50 +67,51 @@ def split_rows_stratified(
         (train_pairs, val_pairs, test_pairs) — каждый [M, 3]
         Гарантия: множества строк в split-ах не пересекаются.
     """
-    rng = np.random.default_rng(seed)
-
     components = _build_components(labeled_pairs)
 
-    # Для каждой компоненты считаем число positives
-    comp_rows = []
-    for comp in components:
-        mask = torch.zeros(len(labeled_pairs), dtype=torch.bool)
-        for i, row in enumerate(labeled_pairs):
-            if row[0].item() in comp or row[1].item() in comp:
-                mask[i] = True
-        comp_pairs = labeled_pairs[mask]
-        n_pos = (comp_pairs[:, 2] == 1).sum().item()
-        comp_rows.append((comp, mask, n_pos, len(comp_pairs)))
+    # node → comp_id (по построению Union-Find row[0] и row[1] каждой пары
+    # лежат в одной компоненте, поэтому для маркировки пары достаточно одного из них).
+    node_to_comp: dict[int, int] = {}
+    for cid, comp in enumerate(components):
+        for node in comp:
+            node_to_comp[node] = cid
 
-    # Сортируем компоненты по размеру (большие первыми — лучше распределяются)
-    comp_rows.sort(key=lambda x: -x[3])
+    pairs_np = labeled_pairs.numpy()
+    n_comps = len(components)
 
-    # Greedy: назначаем компоненту в split с наибольшим дефицитом
-    target_pairs = [r * len(labeled_pairs) for r in ratios]
-    current_pairs = [0.0, 0.0, 0.0]
-    assignments: list[int] = []  # split index per component
+    # comp_id для каждой пары (по row[0])
+    comp_id_per_pair = np.fromiter(
+        (node_to_comp[int(a)] for a in pairs_np[:, 0]),
+        dtype=np.int64, count=len(pairs_np),
+    )
 
-    for _, _, _, n_pairs in comp_rows:
-        # Выбираем split, у которого наибольший дефицит
-        deficits = [target_pairs[i] - current_pairs[i] for i in range(3)]
+    n_pairs_per_comp = np.bincount(comp_id_per_pair, minlength=n_comps)
+
+    # Greedy в порядке убывания размера компоненты
+    order = np.argsort(-n_pairs_per_comp)
+    n_total = len(labeled_pairs)
+    target_pairs = np.array(ratios, dtype=np.float64) * n_total
+    current_pairs = np.zeros(3, dtype=np.float64)
+    split_per_comp = np.empty(n_comps, dtype=np.int64)
+
+    for cid in order:
+        deficits = target_pairs - current_pairs
         best = int(np.argmax(deficits))
-        assignments.append(best)
-        current_pairs[best] += n_pairs
+        split_per_comp[cid] = best
+        current_pairs[best] += n_pairs_per_comp[cid]
 
-    # Собираем пары по split
-    split_masks = [torch.zeros(len(labeled_pairs), dtype=torch.bool) for _ in range(3)]
-    for (_, mask, _, _), split_idx in zip(comp_rows, assignments):
-        split_masks[split_idx] |= mask
+    # Векторизованно: split каждой пары
+    split_per_pair = split_per_comp[comp_id_per_pair]
 
-    train_pairs = labeled_pairs[split_masks[0]]
-    val_pairs = labeled_pairs[split_masks[1]]
-    test_pairs = labeled_pairs[split_masks[2]]
+    train_pairs = labeled_pairs[torch.from_numpy(split_per_pair == 0)]
+    val_pairs = labeled_pairs[torch.from_numpy(split_per_pair == 1)]
+    test_pairs = labeled_pairs[torch.from_numpy(split_per_pair == 2)]
 
     logger.info(
         "Split: train=%d (%.0f%%), val=%d (%.0f%%), test=%d (%.0f%%)",
-        len(train_pairs), 100 * len(train_pairs) / len(labeled_pairs),
-        len(val_pairs), 100 * len(val_pairs) / len(labeled_pairs),
-        len(test_pairs), 100 * len(test_pairs) / len(labeled_pairs),
+        len(train_pairs), 100 * len(train_pairs) / n_total,
+        len(val_pairs), 100 * len(val_pairs) / n_total,
+        len(test_pairs), 100 * len(test_pairs) / n_total,
     )
 
     return train_pairs, val_pairs, test_pairs
