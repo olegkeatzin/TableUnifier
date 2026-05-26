@@ -20,10 +20,19 @@ function ScreenGraph({ onContinue, onBack }) {
     let cancelled = false;
     (async () => {
       try {
-        addLog('info', 'starting graph build · model=bge-m3 · target_col_dim=1024');
-        const res = await window.API.buildGraph({ idfMinDf: idfMin });
-        if (cancelled) return;
-        wsRef.current = window.API.subscribeRun(res.run_id, (ev) => {
+        // Если для текущей сессии уже запущен билд — переподписываемся,
+        // а не запускаем второй. Bus реплеит все буферизованные события,
+        // так что прогресс восстановится с того места, где был.
+        let runId = window.__STATE__.runId;
+        if (runId) {
+          addLog('info', `reattaching to existing run ${runId}`);
+        } else {
+          addLog('info', 'starting graph build · model=bge-m3 · target_col_dim=1024');
+          const res = await window.API.buildGraph({ idfMinDf: idfMin });
+          if (cancelled) return;
+          runId = res.run_id;
+        }
+        wsRef.current = window.API.subscribeRun(runId, (ev) => {
           if (ev.type === 'phase') {
             setPhase(ev.phase);
             setProgress(0);
@@ -37,7 +46,7 @@ function ScreenGraph({ onContinue, onBack }) {
             setPhase('done'); setProgress(1);
             addLog('ok', `graph ready · ${ev.n_rows} row · ${ev.n_tokens} token · ${ev.n_edges} edges`);
             // Подтягиваем реальные узлы/рёбра для визуализации.
-            window.API.getGraph(res.run_id).then((g) => {
+            window.API.getGraph(runId).then((g) => {
               setStats((s) => ({ ...s, col_dim: g.stats?.col_dim || s.col_dim }));
             }).catch((e) => addLog('err', `graph fetch: ${e.message || e}`));
           } else if (ev.type === 'error') {

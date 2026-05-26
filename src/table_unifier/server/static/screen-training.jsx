@@ -31,7 +31,7 @@ function ScreenTraining({ onContinue, onBack }) {
     return () => cancelAnimationFrame(raf);
   }, []);
 
-  const startInference = async () => {
+  const startInference = async (force = false) => {
     setPhase('idle'); setProgress(0); setGraphProgress(0); setPulseLayer(null);
     setLogs([]); setErrorMsg(null);
     const rid = window.__STATE__.runId;
@@ -41,7 +41,15 @@ function ScreenTraining({ onContinue, onBack }) {
       return;
     }
     try {
-      await window.API.runInference({ runId: rid });
+      // Не плодим повторных вызовов /api/infer/run при навигации назад/вперёд.
+      // Если inference уже стартовал на этом run — просто переподписываемся
+      // на WS, buffered события догонят состояние.
+      if (force || window.__STATE__.inferRunId !== rid) {
+        await window.API.runInference({ runId: rid });
+        window.__STATE__.inferRunId = rid;
+      } else {
+        addLog('info', `reattaching to inference on ${rid}`);
+      }
       wsRef.current = window.API.subscribeRun(rid, (ev) => {
         if (ev.type === 'phase') {
           setPhase(ev.phase);
@@ -102,7 +110,7 @@ function ScreenTraining({ onContinue, onBack }) {
           <p>Forward pass предобученной GAT по гетерографу. Слева — структура графа с пульсацией message passing, справа — UMAP-проекция row-эмбеддингов.</p>
         </div>
         <div className="actions">
-          <button className="btn ghost" onClick={startInference}>↻ перезапустить</button>
+          <button className="btn ghost" onClick={() => startInference(true)}>↻ перезапустить</button>
           <Tabs
             active={activeTab}
             setActive={setActiveTab}

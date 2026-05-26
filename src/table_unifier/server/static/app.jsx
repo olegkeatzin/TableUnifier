@@ -16,6 +16,17 @@ function App() {
     setCompleted(new Set());
     setStep(0);
     setReviewDecisions({});
+    // Сбрасываем серверное состояние, чтобы следующий цикл создал новый run.
+    window.__STATE__.runId = null;
+    window.__STATE__.sessionId = null;
+    window.__STATE__.graphReady = false;
+    window.__STATE__.inferDone = false;
+    window.__STATE__.inferRunId = null;
+    window.__DATA__.tableA = null;
+    window.__DATA__.tableB = null;
+    window.__DATA__.candidates = [];
+    window.__DATA__.clusters = [];
+    window.__DATA__.graph = null;
   };
 
   // sidebar stats — dependent on current step
