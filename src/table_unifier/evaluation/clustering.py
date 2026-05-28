@@ -60,18 +60,19 @@ def find_best_threshold(
     embeddings: torch.Tensor,
     val_pairs: torch.Tensor,
     n_thresholds: int = 200,
-) -> tuple[float, float]:
+) -> tuple[float, float, list[list[float]]]:
     """Find cosine similarity threshold that maximises F1 on validation pairs.
 
     Returns:
-        (best_threshold, best_f1)
+        (best_threshold, best_f1, sweep_curve)
+        sweep_curve: list of [threshold, f1] downsampled to n_thresholds points
     """
     scores = _cosine_scores(embeddings, val_pairs)
     labels = val_pairs[:, 2].numpy()
 
     if len(np.unique(labels)) < 2:
         logger.warning("Val pairs have single class — returning default threshold 0.5")
-        return 0.5, 0.0
+        return 0.5, 0.0, []
 
     precision, recall, thresholds = precision_recall_curve(labels, scores)
     # precision_recall_curve returns len(thresholds) = len(precision) - 1
@@ -81,7 +82,18 @@ def find_best_threshold(
         0.0,
     )
     best_idx = np.argmax(f1_scores)
-    return float(thresholds[best_idx]), float(f1_scores[best_idx])
+
+    # Downsample curve to n_thresholds points (PR curve может быть огромной)
+    if len(thresholds) > n_thresholds:
+        idx = np.linspace(0, len(thresholds) - 1, n_thresholds, dtype=int)
+        thr_curve = thresholds[idx]
+        f1_curve = f1_scores[idx]
+    else:
+        thr_curve = thresholds
+        f1_curve = f1_scores
+    sweep = [[float(t), float(f)] for t, f in zip(thr_curve, f1_curve)]
+
+    return float(thresholds[best_idx]), float(f1_scores[best_idx]), sweep
 
 
 def evaluate_pairs_at_threshold(

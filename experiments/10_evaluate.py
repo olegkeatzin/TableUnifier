@@ -129,7 +129,7 @@ def main() -> None:
     embeddings = get_row_embeddings(model, graph, device="cpu")
 
     # Подбор порога на val
-    best_threshold, val_f1 = find_best_threshold(embeddings, val_pairs)
+    best_threshold, val_f1, _ = find_best_threshold(embeddings, val_pairs)
     logger.info("Optimal threshold: %.4f (val F1=%.4f)", best_threshold, val_f1)
 
     # Val metrics (для справки)

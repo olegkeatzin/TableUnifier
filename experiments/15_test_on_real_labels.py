@@ -331,7 +331,7 @@ def eval_with_threshold_sweep(
         logger.warning("[%s] нечего оценивать (пар=%d)", name, pairs.shape[0])
         return {"n_pairs": int(pairs.shape[0])}
 
-    threshold, sweep_f1 = find_best_threshold(embeddings, pairs)
+    threshold, _, sweep_f1 = find_best_threshold(embeddings, pairs)
     metrics = evaluate_pairs_at_threshold(embeddings, pairs, threshold)
     metrics.update(evaluate_pairs_auc(embeddings, pairs))
     metrics["sweep_f1"] = sweep_f1

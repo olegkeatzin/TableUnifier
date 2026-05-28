@@ -102,7 +102,7 @@ def load_bge_model(model_path: Path, graph, device: str) -> EntityResolutionGAT:
 
 def _threshold_metrics(embeddings, val_pairs, test_pairs):
     """Baseline: single threshold sweep на val, метрики на val + test."""
-    thr, val_f1 = find_best_threshold(embeddings, val_pairs)
+    thr, val_f1, _ = find_best_threshold(embeddings, val_pairs)
     val = evaluate_pairs_at_threshold(embeddings, val_pairs, thr)
     val.update(evaluate_pairs_auc(embeddings, val_pairs))
     test = evaluate_pairs_at_threshold(embeddings, test_pairs, thr)
