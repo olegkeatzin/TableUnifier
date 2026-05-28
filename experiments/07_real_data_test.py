@@ -293,24 +293,60 @@ def load_model(graph, device: str, model_path: Path | None = None):
 
     logger.info("Загрузка модели: %s", found)
 
-    config = BEST_CONFIG
-    config.row_dim = int(graph["row"].x.shape[1])
-    config.token_dim = int(graph["token"].x.shape[1])
-    config.col_dim = int(graph.col_embeddings.shape[1])
-
-    from table_unifier.models.entity_resolution import EntityResolutionGNN
-
-    model = EntityResolutionGNN(
-        row_dim=config.row_dim,
-        token_dim=config.token_dim,
-        col_dim=config.col_dim,
-        hidden_dim=config.hidden_dim,
-        edge_dim=config.edge_dim,
-        output_dim=config.output_dim,
-        num_gnn_layers=config.num_gnn_layers,
-        dropout=config.dropout,
-        bidirectional=config.bidirectional,
+    from table_unifier.models.entity_resolution import (
+        EntityResolutionGAT,
+        EntityResolutionGNN,
     )
+
+    row_dim = int(graph["row"].x.shape[1])
+    token_dim = int(graph["token"].x.shape[1])
+    col_dim = int(graph.col_embeddings.shape[1])
+
+    cfg_path = found.with_suffix(".config.json")
+    if cfg_path.exists():
+        with open(cfg_path) as f:
+            cfg = json.load(f)
+        logger.info("Конфиг модели из %s", cfg_path)
+        arch = "gat" if "num_heads" in cfg else "gnn"
+        hidden_dim = cfg["hidden_dim"]
+        edge_dim = cfg["edge_dim"]
+        output_dim = cfg["output_dim"]
+        num_gnn_layers = cfg["num_gnn_layers"]
+        dropout = cfg["dropout"]
+        bidirectional = cfg.get("bidirectional", True)
+        use_input_projection = cfg.get("use_input_projection", True)
+        num_heads = cfg.get("num_heads", 4)
+        attention_dropout = cfg.get("attention_dropout", 0.1)
+    else:
+        logger.info("Конфиг рядом с моделью не найден — fallback на BEST_CONFIG")
+        arch = "gnn"
+        hidden_dim = BEST_CONFIG.hidden_dim
+        edge_dim = BEST_CONFIG.edge_dim
+        output_dim = BEST_CONFIG.output_dim
+        num_gnn_layers = BEST_CONFIG.num_gnn_layers
+        dropout = BEST_CONFIG.dropout
+        bidirectional = BEST_CONFIG.bidirectional
+        use_input_projection = True
+        num_heads = 4
+        attention_dropout = 0.1
+
+    if arch == "gat":
+        model = EntityResolutionGAT(
+            row_dim=row_dim, token_dim=token_dim, col_dim=col_dim,
+            hidden_dim=hidden_dim, edge_dim=edge_dim, output_dim=output_dim,
+            num_gnn_layers=num_gnn_layers, num_heads=num_heads,
+            dropout=dropout, attention_dropout=attention_dropout,
+            bidirectional=bidirectional,
+            use_input_projection=use_input_projection,
+        )
+    else:
+        model = EntityResolutionGNN(
+            row_dim=row_dim, token_dim=token_dim, col_dim=col_dim,
+            hidden_dim=hidden_dim, edge_dim=edge_dim, output_dim=output_dim,
+            num_gnn_layers=num_gnn_layers, dropout=dropout,
+            bidirectional=bidirectional,
+        )
+
     state = torch.load(found, map_location=device, weights_only=False)
     model.load_state_dict(state)
     model.to(device)
