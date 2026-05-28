@@ -218,8 +218,23 @@ def main() -> None:
         max_tokens_per_cell=args.max_tokens_per_cell,
         min_token_count=args.min_token_count,
     )
+    # Per-dataset стратификация: каждый датасет делится 70/15/15 отдельно.
+    # Иначе одна гигантская компонента (ozon URL clustering, auto_ru) уходит
+    # целиком в один сплит → train/val разные распределения.
+    global_to_dataset: dict[int, str] = {}
+    for name, maps in dataset_mappings.items():
+        for gidx in maps["id_to_global_a"].values():
+            global_to_dataset[int(gidx)] = name
+        for gidx in maps["id_to_global_b"].values():
+            global_to_dataset[int(gidx)] = name
+    name_to_id = {n: i for i, n in enumerate(sorted(dataset_mappings.keys()))}
+    pair_dataset_ids = torch.tensor(
+        [name_to_id[global_to_dataset[int(ga)]] for ga, _gb, _ in all_labeled.tolist()],
+        dtype=torch.long,
+    )
     train_pairs, val_pairs, test_pairs = split_rows_stratified(
         all_labeled, ratios=(0.7, 0.15, 0.15), seed=42,
+        dataset_ids=pair_dataset_ids,
     )
 
     # 4. Сохранение
