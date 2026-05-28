@@ -648,11 +648,17 @@ def main() -> None:
                         help="Каталог вывода (по умолч. output/07_real_data_test). "
                              "Используй для изоляции разных моделей, напр. "
                              "output/07_real_data_test_bge-m3")
+    parser.add_argument("--graph-cache-dir", default=None, type=Path,
+                        help="Каталог с готовым кэшем графа+эмбеддингов (read-only). "
+                             "Полезно когда модель меняется, а граф остаётся: "
+                             "указываешь общий cache-dir + отдельный output-dir.")
     args = parser.parse_args()
 
     global OUTPUT_DIR
     if args.output_dir is not None:
         OUTPUT_DIR = args.output_dir
+
+    cache_dir = args.graph_cache_dir if args.graph_cache_dir is not None else OUTPUT_DIR
 
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -662,11 +668,11 @@ def main() -> None:
 
     # 2. Эмбеддинги
     if args.skip_embeddings:
-        logger.info("Загрузка эмбеддингов из кеша...")
-        data = np.load(OUTPUT_DIR / "column_embeddings.npz")
+        logger.info("Загрузка эмбеддингов из кеша: %s", cache_dir)
+        data = np.load(cache_dir / "column_embeddings.npz")
         col_embeddings = {k: data[k] for k in data.files}
-        row_emb_a = np.load(OUTPUT_DIR / "row_embeddings_a.npy")
-        row_emb_b = np.load(OUTPUT_DIR / "row_embeddings_b.npy")
+        row_emb_a = np.load(cache_dir / "row_embeddings_a.npy")
+        row_emb_b = np.load(cache_dir / "row_embeddings_b.npy")
     else:
         ollama_cfg = OllamaConfig(host=args.ollama_host)
         col_embeddings, row_emb_a, row_emb_b = generate_and_cache_embeddings(
@@ -677,11 +683,11 @@ def main() -> None:
 
     # 3. Граф
     if args.skip_graph:
-        logger.info("Загрузка графа из кеша...")
-        graph = torch.load(OUTPUT_DIR / "graph.pt", weights_only=False)
-        with open(OUTPUT_DIR / "id_to_global_a.json") as f:
+        logger.info("Загрузка графа из кеша: %s", cache_dir)
+        graph = torch.load(cache_dir / "graph.pt", weights_only=False)
+        with open(cache_dir / "id_to_global_a.json") as f:
             id_to_global_a = json.load(f)
-        with open(OUTPUT_DIR / "id_to_global_b.json") as f:
+        with open(cache_dir / "id_to_global_b.json") as f:
             id_to_global_b = json.load(f)
     else:
         graph, id_to_global_a, id_to_global_b = build_and_cache_graph(
