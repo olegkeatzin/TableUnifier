@@ -329,6 +329,7 @@ def train_entity_resolution_minibatch(
     save_path: Path | None = None,
     epoch_callback: "Callable[[int, float | None], None] | None" = None,
     model_class: str = "gat",
+    num_workers: int = 4,
 ) -> tuple["nn.Module", dict]:
     """Mini-batch обучение ER на объединённом графе с NT-Xent loss.
 
@@ -451,8 +452,8 @@ def train_entity_resolution_minibatch(
             input_nodes=("row", all_train_rows),
             batch_size=min(config.batch_size, len(all_train_rows)),
             shuffle=True,
-            num_workers=4,
-            persistent_workers=True,
+            num_workers=num_workers,
+            persistent_workers=num_workers > 0,
         )
 
         epoch_loss = 0.0
@@ -511,8 +512,8 @@ def train_entity_resolution_minibatch(
                 input_nodes=("row", val_seed),
                 batch_size=min(512, len(val_seed)),
                 shuffle=False,
-                num_workers=4,
-                persistent_workers=True,
+                num_workers=num_workers,
+                persistent_workers=num_workers > 0,
             )
 
             val_loss_sum = 0.0
@@ -599,6 +600,7 @@ def train_entity_resolution_bce(
     save_path: Path | None = None,
     epoch_callback: "Callable[[int, float | None], None] | None" = None,
     model_class: str = "gat",
+    num_workers: int = 4,
 ) -> tuple["nn.Module", dict]:
     """Mini-batch обучение ER с BCE loss (классификация пар).
 
@@ -698,8 +700,8 @@ def train_entity_resolution_bce(
             input_nodes=("row", all_train_rows),
             batch_size=min(config.batch_size, len(all_train_rows)),
             shuffle=True,
-            num_workers=4,
-            persistent_workers=True,
+            num_workers=num_workers,
+            persistent_workers=num_workers > 0,
         )
 
         epoch_loss = 0.0
@@ -753,8 +755,8 @@ def train_entity_resolution_bce(
                 input_nodes=("row", val_seed),
                 batch_size=min(512, len(val_seed)),
                 shuffle=False,
-                num_workers=4,
-                persistent_workers=True,
+                num_workers=num_workers,
+                persistent_workers=num_workers > 0,
             )
 
             val_loss_sum = 0.0

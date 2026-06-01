@@ -77,6 +77,8 @@ def main() -> None:
     parser.add_argument("--weight-decay", type=float, default=5e-4)
     parser.add_argument("--bidirectional", action="store_true", default=True)
     parser.add_argument("--no-bidirectional", dest="bidirectional", action="store_false")
+    parser.add_argument("--num-workers", type=int, default=4,
+                        help="DataLoader workers. Поставь 0 если Bus error / нехватка /dev/shm.")
     args = parser.parse_args()
 
     config = Config(data_dir=Path(args.data_dir), output_dir=Path(args.output_dir))
@@ -142,12 +144,14 @@ def main() -> None:
             graph=graph, train_pairs=train_pairs, val_pairs=val_pairs,
             config=er_config, device=device, save_path=save_path,
             epoch_callback=callback, model_class="gat",
+            num_workers=args.num_workers,
         )
     else:
         model, history = train_entity_resolution_minibatch(
             graph=graph, train_pairs=train_pairs, val_pairs=val_pairs,
             config=er_config, device=device, save_path=save_path,
             epoch_callback=callback, model_class="gat",
+            num_workers=args.num_workers,
         )
 
     config_path = save_path.with_suffix(".config.json")
