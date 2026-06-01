@@ -87,6 +87,8 @@ def main() -> None:
     parser.add_argument("--no-bidirectional", dest="bidirectional", action="store_false")
     parser.add_argument("--num-workers", type=int, default=4,
                         help="DataLoader workers. Поставь 0 если Bus error / нехватка /dev/shm.")
+    parser.add_argument("--warmup-epochs", type=int, default=10,
+                        help="Фикс. число warmup эпох (переопределяет warmup_ratio=0.1).")
     args = parser.parse_args()
 
     config = Config(data_dir=Path(args.data_dir), output_dir=Path(args.output_dir))
@@ -136,7 +138,7 @@ def main() -> None:
         bidirectional=args.bidirectional,
         lr=args.lr,
         weight_decay=args.weight_decay,
-        warmup_ratio=0.1,
+        warmup_ratio=args.warmup_epochs / max(args.max_epochs, 1),
         epochs=args.max_epochs,
         batch_size=args.batch_size,
         use_input_projection=False,
