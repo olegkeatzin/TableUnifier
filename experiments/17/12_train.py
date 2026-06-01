@@ -36,14 +36,22 @@ DEFAULT_SUBDIR = "v17_views"
 
 
 class EarlyStopping:
-    def __init__(self, patience: int = 30):
+    def __init__(self, patience: int = 30, warmup_epochs: int = 0):
         self.patience = patience
+        self.warmup_epochs = warmup_epochs
         self.best_val = float("inf")
         self.best_epoch = 0
         self.no_improve = 0
 
     def __call__(self, epoch: int, val_loss: float | None) -> None:
         if val_loss is None:
+            return
+        if epoch <= self.warmup_epochs:
+            # Во время warmup LR ещё растёт линейно — val_loss шумит.
+            # Трекаем лучшее значение, но patience не накручиваем.
+            if val_loss < self.best_val:
+                self.best_val = val_loss
+                self.best_epoch = epoch
             return
         if val_loss < self.best_val:
             self.best_val = val_loss
@@ -137,7 +145,13 @@ def main() -> None:
                 args.loss, col_dim, args.num_gnn_layers, args.num_heads,
                 args.dropout, args.bidirectional, args.lr)
 
-    callback = None if args.no_early_stopping else EarlyStopping(patience=args.patience)
+    warmup_epochs = max(1, int(er_config.epochs * er_config.warmup_ratio))
+    callback = (
+        None if args.no_early_stopping
+        else EarlyStopping(patience=args.patience, warmup_epochs=warmup_epochs)
+    )
+    logger.info("Early stopping: patience=%d, warmup_epochs=%d (отсчёт начнётся с эпохи %d)",
+                args.patience, warmup_epochs, warmup_epochs + 1)
 
     if args.loss == "bce":
         model, history = train_entity_resolution_bce(
