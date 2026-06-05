@@ -215,8 +215,18 @@ All paths relative to `src/table_unifier/`:
 | `models/gat_layer.py` | GATv2 layer с edge features |
 | `models/losses.py` | TripletLoss + полу-жёсткий майнинг |
 | `evaluation/clustering.py` | Threshold sweep (F1), ROC-AUC, HDBSCAN clustering |
+| `evaluation/ga_hdbscan.py` | HDBSCAN + DEAP GA подбор параметров (exp 18); backends cpu/gpu/auto |
+| `evaluation/ga_cc.py` | Connected-components кластеризация + DEAP GA (гены `tau`, `top_k`) |
+| `evaluation/ga_common.py` | Общая F-beta фитнес-функция + pair-метрики для обоих ГА-кластеризаторов |
 | `training/schema_trainer.py` | Обучение SchemaProjector |
 | `training/er_trainer.py` | Обучение ER модели: `train_entity_resolution` (single), `train_entity_resolution_multidataset` (round-robin baseline), `train_entity_resolution_minibatch` (unified graph, exps 14/18, основной путь), `train_entity_resolution_bce` (BCE variant); `get_row_embeddings` + `find_duplicates` для инференса |
+
+### Server (инференс-API)
+
+`src/table_unifier/server/` изолирован от pipeline. `main.py` (`create_app()`) собирает FastAPI и монтирует фронт из `static/`. Структура:
+- `routes/` — эндпоинты: `sources` (загрузка таблиц), `graph` (построение/просмотр графа), `infer` (запуск инференса), `clusters` (результаты дедупликации), `export` (выгрузка).
+- `services/` — `inference.py` (прогон чекпоинта), `progress.py` (SSE-шина `bus` для прогресса), `storage.py` (хранение загруженных данных).
+- `models.py` — Pydantic-модели запросов/ответов.
 
 ### Testing
 
