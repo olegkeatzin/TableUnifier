@@ -10,9 +10,15 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pandas as pd
+
+# Windows-консоль по умолчанию в cp1251 — переключаем stdout на UTF-8,
+# иначе print со стрелками ↔ / · падает с UnicodeEncodeError.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
 
 OUT = Path("data/test_webapp")
 OUT.mkdir(parents=True, exist_ok=True)
