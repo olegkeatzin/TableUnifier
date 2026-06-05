@@ -34,7 +34,7 @@ dependencies = [
     "dvc-webdav>=3.0.1",
     "kagglehub>=0.3.0",
     "deap>=1.4.1",
-    "pyg-lib==0.6.0+pt29cu128",
+    "pyg-lib==0.6.0+pt29cu128 ; sys_platform == 'linux'",
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.32.0",
     "python-multipart>=0.0.9",
@@ -43,8 +43,16 @@ dependencies = [
     "httpx>=0.27.0",
 ]
 
+# pyg-lib собирается только под Linux/macOS — на Windows зависимость пропускается
+# (см. marker выше). На Linux колесо тянется с индекса PyG, без локального .whl.
 [tool.uv.sources]
-pyg-lib = { path = "wheels/pyg_lib-0.6.0+pt29cu128-cp312-cp312-manylinux_2_28_x86_64.whl" }
+pyg-lib = { index = "pyg" }
+
+[[tool.uv.index]]
+name = "pyg"
+url = "https://data.pyg.org/whl/torch-2.9.0+cu128.html"
+format = "flat"
+explicit = true
 
 [build-system]
 requires = ["hatchling"]
