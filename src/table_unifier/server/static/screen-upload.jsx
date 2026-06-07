@@ -7,7 +7,7 @@ function TablePreview({ tbl, accentColor }) {
       <div className="table-card-h">
         <span className="dot" style={{ background: accentColor }}></span>
         <span className="name">{tbl.name}</span>
-        <span className="meta">{tbl.rows} rows · {tbl.cols.length} cols</span>
+        <span className="meta">{tbl.rows} строк · {tbl.cols.length} столбцов</span>
       </div>
       <div className="table-card-body">
         <table className="dt">
@@ -36,7 +36,12 @@ function TablePreview({ tbl, accentColor }) {
 }
 
 function ScreenUpload({ onContinue }) {
-  const [files, setFiles] = useState([]);
+  // Seed from already-loaded sources (e.g. landing mid-flow or after reload)
+  // so the file list mirrors __DATA__ instead of looking empty.
+  const [files, setFiles] = useState(() =>
+    ((window.__DATA__ && window.__DATA__.sources) || []).map((s, i) => ({
+      name: s.name, size: s.size_bytes, ref: i === 0 ? 'A' : i === 1 ? 'B' : null, id: s.id,
+    })));
   const [dragging, setDragging] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [uploadErr, setUploadErr] = useState(null);
@@ -78,7 +83,7 @@ function ScreenUpload({ onContinue }) {
       <div className="screen-header">
         <div>
           <h1>Источники данных</h1>
-          <p>Загрузите Excel/CSV-файлы для объединения. TableUnifier автоматически выявит общие сущности через embedding-based entity resolution.</p>
+          <p>Загрузите Excel/CSV-файлы для объединения. TableUnifier автоматически выявит общие сущности через сопоставление по эмбеддингам.</p>
         </div>
       </div>
 
@@ -129,7 +134,7 @@ function ScreenUpload({ onContinue }) {
                     <div style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
                                   fontFamily: 'var(--font-mono)', fontSize: 11.5 }}>{f.name}</div>
                     <div style={{ color: 'var(--text-4)', fontSize: 10.5, fontFamily: 'var(--font-mono)' }}>
-                      {(f.size / 1024).toFixed(1)} KB · parsed
+                      {(f.size / 1024).toFixed(1)} КБ · разобрано
                     </div>
                   </div>
                 </div>
@@ -168,14 +173,14 @@ function ScreenUpload({ onContinue }) {
               </div>
               <div style={{ display: 'flex', gap: 6 }}>
                 <span className="chip">qwen3-emb · 4096d</span>
-                <span className="chip warn"><span className="dot"></span>auto-match</span>
+                <span className="chip warn"><span className="dot"></span>авто-сопоставление</span>
               </div>
             </div>
           </div>
         )}
 
         {tableA && tableB && (
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, minHeight: 0, flex: 1 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, minHeight: 220, flex: 1 }}>
             <TablePreview tbl={tableA} accentColor="var(--row)" />
             <TablePreview tbl={tableB} accentColor="var(--token)" />
           </div>

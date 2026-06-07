@@ -139,7 +139,7 @@
                                 useGa = false } = {}) {
     const body = {
       run_id: runId || window.__STATE__.runId,
-      checkpoint: checkpoint || "output/bge-m3/v14_mrl_gat_model.pt",
+      checkpoint: checkpoint || "output/bge-m3/v17_views_gat_model.pt",
       similarity_threshold: threshold,
       use_ga_tuning: useGa,
     };

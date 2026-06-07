@@ -18,16 +18,16 @@ function BrandMark() {
 // ---------- Sidebar steps ----------
 const STEPS = [
   { key: 'upload',  label: 'Источники',     sub: 'Загрузка .xlsx' },
-  { key: 'graph',   label: 'Граф',          sub: 'row + token nodes' },
-  { key: 'infer',   label: 'Инференс GNN',  sub: 'message passing · L=2' },
-  { key: 'review',  label: 'Ревью пар',     sub: 'кандидаты-дубликаты' },
-  { key: 'result',  label: 'Результат',     sub: 'unified table + export' },
+  { key: 'graph',   label: 'Граф',          sub: 'узлы строк и токенов' },
+  { key: 'infer',   label: 'Инференс GNN',  sub: 'передача сообщений · L=2' },
+  { key: 'review',  label: 'Проверка пар',     sub: 'кандидаты-дубликаты' },
+  { key: 'result',  label: 'Результат',     sub: 'единая таблица + экспорт' },
 ];
 
 function Sidebar({ current, setCurrent, completed, stats }) {
   return (
     <aside className="sidebar">
-      <h6>Pipeline</h6>
+      <h6>Этапы</h6>
       <div className="steps">
         {STEPS.map((s, i) => {
           const isActive = current === i;
@@ -60,6 +60,92 @@ function Sidebar({ current, setCurrent, completed, stats }) {
   );
 }
 
+// ---- UI scale (projector legibility) ----
+function UIScale() {
+  const MIN = 1.0, MAX = 1.8, STEP = 0.1, DEF = 1.25;
+  const read = () => {
+    let v = NaN;
+    try { v = parseFloat(localStorage.getItem('tableunifier:uiscale')); } catch (_e) { /* noop */ }
+    if (isNaN(v)) {
+      v = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--ui-zoom')) || DEF;
+    }
+    return v;
+  };
+  const [z, setZ] = useState(read);
+  // Read the live applied value (not the React closure) so rapid clicks compound.
+  const bump = (delta) => {
+    const cur = parseFloat(
+      document.documentElement.style.getPropertyValue('--ui-zoom')
+    ) || z;
+    const nz = Math.round(Math.min(MAX, Math.max(MIN, cur + delta)) * 100) / 100;
+    document.documentElement.style.setProperty('--ui-zoom', String(nz));
+    try { localStorage.setItem('tableunifier:uiscale', String(nz)); } catch (_e) { /* noop */ }
+    setZ(nz);
+  };
+  const btnStyle = {
+    height: '100%', width: 24, padding: 0, borderRadius: 0,
+    justifyContent: 'center', fontSize: 15, color: 'var(--text-2)',
+  };
+  return (
+    <div title="Масштаб интерфейса"
+      style={{ display: 'flex', alignItems: 'center', height: 24,
+               border: '1px solid var(--border)', borderRadius: 6,
+               background: 'var(--surface)', overflow: 'hidden' }}>
+      <button className="btn ghost" style={btnStyle} onClick={() => bump(-STEP)}
+        disabled={z <= MIN + 1e-6} aria-label="Меньше">−</button>
+      <span className="mono" style={{ minWidth: 40, textAlign: 'center', fontSize: 11, color: 'var(--text-2)' }}>
+        {Math.round(z * 100)}%
+      </span>
+      <button className="btn ghost" style={btnStyle} onClick={() => bump(STEP)}
+        disabled={z >= MAX - 1e-6} aria-label="Больше">+</button>
+    </div>
+  );
+}
+
+// ---- Theme toggle ----
+function ThemeToggle() {
+  const [theme, setTheme] = useState(
+    () => document.documentElement.getAttribute('data-theme') || 'dark'
+  );
+  const toggle = () => {
+    const next = theme === 'dark' ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-theme', next);
+    try { localStorage.setItem('tableunifier:theme', next); } catch (_e) { /* noop */ }
+    setTheme(next);
+  };
+  const isDark = theme === 'dark';
+  return (
+    <button
+      className="btn icon"
+      onClick={toggle}
+      title={isDark ? 'Переключить на светлую тему' : 'Переключить на тёмную тему'}
+      aria-label="Сменить тему"
+      style={{ color: 'var(--text-2)' }}>
+      {isDark ? (
+        // sun (action: switch to light)
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+          <circle cx="12" cy="12" r="4.4" fill="currentColor" stroke="none" />
+          <line x1="12" y1="1.5" x2="12" y2="4" />
+          <line x1="12" y1="20" x2="12" y2="22.5" />
+          <line x1="1.5" y1="12" x2="4" y2="12" />
+          <line x1="20" y1="12" x2="22.5" y2="12" />
+          <line x1="4.3" y1="4.3" x2="6" y2="6" />
+          <line x1="18" y1="18" x2="19.7" y2="19.7" />
+          <line x1="19.7" y1="4.3" x2="18" y2="6" />
+          <line x1="6" y1="18" x2="4.3" y2="19.7" />
+        </svg>
+      ) : (
+        // moon (action: switch to dark) — crescent from two circles
+        <svg width="15" height="15" viewBox="0 0 24 24">
+          <circle cx="12" cy="12" r="8.5" fill="currentColor" />
+          <circle cx="15.5" cy="9.2" r="7" fill="var(--bg)" />
+        </svg>
+      )}
+    </button>
+  );
+}
+
 // ---------- Topbar ----------
 function Topbar({ stepIdx }) {
   return (
@@ -79,6 +165,8 @@ function Topbar({ stepIdx }) {
         <span className="pill">L=2 GNN</span>
         <span className="pill">device: cuda:0</span>
       </div>
+      <UIScale />
+      <ThemeToggle />
       <div className="avatar">ОК</div>
     </header>
   );
@@ -91,13 +179,13 @@ function StatusBar({ stepIdx, running }) {
       <span className="ok">●</span>
       <span>ollama @ nvidia-server:11434</span>
       <span style={{ color: 'var(--border-strong)' }}>│</span>
-      <span>mlflow run: er_v17_views_gat_2026-05-26</span>
+      <span>mlflow run: er_v14_mrl_gat_2026-06-05</span>
       <span style={{ color: 'var(--border-strong)' }}>│</span>
-      <span>{running ? <><span className="spinner" style={{ verticalAlign: '-2px' }}></span> &nbsp;running</> : 'idle'}</span>
+      <span>{running ? <><span className="spinner" style={{ verticalAlign: '-2px' }}></span> &nbsp;выполняется</> : 'ожидание'}</span>
       <div className="spacer"></div>
-      <span>step {stepIdx + 1}/{STEPS.length}</span>
+      <span>шаг {stepIdx + 1}/{STEPS.length}</span>
       <span style={{ color: 'var(--border-strong)' }}>│</span>
-      <span>↑↓ navigate · ↵ continue</span>
+      <span>↑↓ навигация · ↵ далее</span>
     </div>
   );
 }
@@ -156,5 +244,5 @@ function ColorSwatch({ value }) {
 
 // expose
 Object.assign(window, {
-  Sidebar, Topbar, StatusBar, BrandMark, ScreenFooter, Tabs, ColorSwatch, STEPS,
+  Sidebar, Topbar, StatusBar, BrandMark, ScreenFooter, Tabs, ColorSwatch, ThemeToggle, UIScale, STEPS,
 });

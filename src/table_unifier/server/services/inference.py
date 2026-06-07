@@ -38,6 +38,26 @@ def _log(run_id: str, level: str, msg: str) -> None:
     _publish(run_id, {"type": "log", "level": level, "msg": msg})
 
 
+def _graph_nbytes(graph) -> int:
+    """Суммарный размер тензоров HeteroData в байтах (для метрики памяти графа)."""
+    total = 0
+    seen: set[int] = set()
+
+    def _add(t: Any) -> None:
+        nonlocal total
+        if isinstance(t, torch.Tensor) and id(t) not in seen:
+            seen.add(id(t))
+            total += t.element_size() * t.nelement()
+
+    for store in graph.stores:
+        for value in store.values():
+            _add(value)
+    # Глобальные атрибуты, которые могут не попасть в stores.
+    for attr in ("col_embeddings", "token_ids"):
+        _add(getattr(graph, attr, None))
+    return total
+
+
 def _mrl_truncate(emb: np.ndarray, target_dim: int) -> np.ndarray:
     """MRL truncation + L2 renorm (qwen3-embedding обучен с MRL)."""
     if emb.ndim == 1:
@@ -209,12 +229,14 @@ def build_graph_run(run_id: str, *,
         texts_b = [serialize_row(r, cols_b) for _, r in run.table_b.iterrows()]
         _publish(run_id, {"type": "progress", "phase": "embed", "progress": 0.1})
 
+        _t_row = time.perf_counter()
         row_emb_a = token_embedder.embed_sentences(texts_a, batch_size=16,
                                                     desc="rows A")
         _publish(run_id, {"type": "progress", "phase": "embed", "progress": 0.5})
         _log(run_id, "ok", f"row embeddings A: {row_emb_a.shape}")
         row_emb_b = token_embedder.embed_sentences(texts_b, batch_size=16,
                                                     desc="rows B")
+        t_row_embeddings_ms = (time.perf_counter() - _t_row) * 1000
         _publish(run_id, {"type": "progress", "phase": "embed", "progress": 1.0})
         _log(run_id, "ok", f"row embeddings B: {row_emb_b.shape}")
 
@@ -226,11 +248,17 @@ def build_graph_run(run_id: str, *,
         except Exception as e:
             raise RuntimeError(f"Не удалось подключиться к Ollama: {e}") from e
         _log(run_id, "info", "computing column embeddings via Ollama qwen3-embedding:8b")
+        # timings аккумулирует descriptions_ms (LLM) + embed_ms по обоим вызовам.
+        col_timings: dict[str, float] = {}
         try:
-            col_emb_a = generate_column_embeddings(ollama, run.table_a, columns=cols_a)
-            col_emb_b = generate_column_embeddings(ollama, run.table_b, columns=cols_b)
+            col_emb_a = generate_column_embeddings(ollama, run.table_a, columns=cols_a,
+                                                   timings=col_timings)
+            col_emb_b = generate_column_embeddings(ollama, run.table_b, columns=cols_b,
+                                                   timings=col_timings)
         except Exception as e:
             raise RuntimeError(f"Ollama embedding failed: {e}") from e
+        t_col_descriptions_ms = col_timings.get("descriptions_ms", 0.0)
+        t_col_embeddings_ms = col_timings.get("embed_ms", 0.0)
         _publish(run_id, {"type": "progress", "phase": "tokenize", "progress": 1.0})
         _log(run_id, "ok", f"qwen3-emb: {len(col_emb_a)} (A) + {len(col_emb_b)} (B) колонок")
 
@@ -270,8 +298,23 @@ def build_graph_run(run_id: str, *,
         run.id_to_global_a = id_to_global_a
         run.id_to_global_b = id_to_global_b
         run.status = "graph_ready"
-        run.metrics.update({"n_rows": n_rows, "n_tokens": n_tokens,
-                            "n_edges": n_edges, "col_dim": target_col_dim})
+
+        graph_bytes = _graph_nbytes(graph)
+        run.metrics.update({
+            "n_rows": n_rows, "n_tokens": n_tokens,
+            "n_edges": n_edges, "col_dim": target_col_dim,
+            # тайминги стадий сборки (мс) — для панели «время выполнения» на экране инференса
+            "t_row_embeddings_ms": round(t_row_embeddings_ms, 1),
+            "t_col_descriptions_ms": round(t_col_descriptions_ms, 1),
+            "t_col_embeddings_ms": round(t_col_embeddings_ms, 1),
+            "graph_bytes": graph_bytes,
+            "graph_mem_mb": round(graph_bytes / 1048576, 3),
+        })
+        _log(run_id, "info",
+             f"timings · rows {t_row_embeddings_ms:.0f}ms · "
+             f"col-desc {t_col_descriptions_ms:.0f}ms · "
+             f"col-emb {t_col_embeddings_ms:.0f}ms · "
+             f"graph {graph_bytes / 1048576:.1f}MB")
 
         _publish(run_id, {"type": "graph_done",
                           "n_rows": n_rows, "n_tokens": n_tokens, "n_edges": n_edges})
@@ -528,11 +571,22 @@ def run_inference(run_id: str, *,
 
         run.candidates = candidates
         run.clusters = clusters
+        # t_total_ms = сумма стадий сборки графа (из run.metrics) + GAT forward.
+        t_gat_ms = round(forward_ms, 1)
+        t_total_ms = round(
+            run.metrics.get("t_row_embeddings_ms", 0.0)
+            + run.metrics.get("t_col_descriptions_ms", 0.0)
+            + run.metrics.get("t_col_embeddings_ms", 0.0)
+            + t_gat_ms,
+            1,
+        )
         run.metrics.update({
             "n_pairs_found": n_pairs,
             "n_clusters": len(clusters),
             "n_input_rows": n_a + n_b,
             "latency_ms": int(forward_ms),
+            "t_gat_ms": t_gat_ms,
+            "t_total_ms": t_total_ms,
             "threshold": similarity_threshold,
         })
         run.status = "done"

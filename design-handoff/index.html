@@ -7,7 +7,18 @@
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
-<link rel="stylesheet" href="styles.css" />
+<link rel="stylesheet" href="styles.css?v=23" />
+<script>
+/* Apply saved theme before first paint to avoid a flash. */
+(function () {
+  try {
+    var t = localStorage.getItem('tableunifier:theme');
+    if (t) document.documentElement.setAttribute('data-theme', t);
+    var z = localStorage.getItem('tableunifier:uiscale');
+    if (z) document.documentElement.style.setProperty('--ui-zoom', z);
+  } catch (e) { /* private mode — ignore */ }
+})();
+</script>
 </head>
 <body>
 <div id="root"></div>
@@ -16,16 +27,16 @@
 <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
 <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
 
-<script src="data.js"></script>
-<script type="text/babel" src="ui.jsx"></script>
-<script type="text/babel" src="graph-viz.jsx"></script>
-<script type="text/babel" src="embedding-viz.jsx"></script>
-<script type="text/babel" src="screen-upload.jsx"></script>
-<script type="text/babel" src="screen-graph.jsx"></script>
-<script type="text/babel" src="screen-training.jsx"></script>
-<script type="text/babel" src="screen-review.jsx"></script>
-<script type="text/babel" src="screen-result.jsx"></script>
-<script type="text/babel" src="app.jsx"></script>
+<script src="api.js?v=23"></script>
+<script type="text/babel" src="ui.jsx?v=23"></script>
+<script type="text/babel" src="graph-viz.jsx?v=23"></script>
+<script type="text/babel" src="embedding-viz.jsx?v=23"></script>
+<script type="text/babel" src="screen-upload.jsx?v=23"></script>
+<script type="text/babel" src="screen-graph.jsx?v=23"></script>
+<script type="text/babel" src="screen-training.jsx?v=23"></script>
+<script type="text/babel" src="screen-review.jsx?v=23"></script>
+<script type="text/babel" src="screen-result.jsx?v=23"></script>
+<script type="text/babel" src="app.jsx?v=23"></script>
 
 </body>
 </html>

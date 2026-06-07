@@ -1,15 +1,6 @@
 // 2D embedding space — shows row embeddings as dots that move/cluster
-// during training. Independent from graph-viz; uses precomputed
-// initial random positions and final cluster positions.
+// during inference. Uses real row data from window.__DATA__.graph.
 
-function buildEmbInitial() {
-  const rng = makeSeededRng2(7);
-  const pos = {};
-  Object.keys(ROW_TOKENS).forEach((id) => {
-    pos[id] = { x: rng() * 0.9 + 0.05, y: rng() * 0.9 + 0.05 };
-  });
-  return pos;
-}
 function makeSeededRng2(seed) {
   let s = seed >>> 0;
   return () => {
@@ -18,24 +9,47 @@ function makeSeededRng2(seed) {
   };
 }
 
-function buildEmbFinal() {
+// Hash a string to a uint32 seed.
+function strHash(str) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = (h * 0x01000193) >>> 0;
+  }
+  return h;
+}
+
+function buildEmbInitial(rows) {
+  const pos = {};
+  rows.forEach((r) => {
+    const rng = makeSeededRng2(strHash(r.id) ^ 7);
+    pos[r.id] = { x: rng() * 0.88 + 0.06, y: rng() * 0.88 + 0.06 };
+  });
+  return pos;
+}
+
+function buildEmbFinal(rows, clusterByRow) {
   const rng = makeSeededRng2(99);
   const pos = {};
-  // Place each true cluster at a 2D centroid
-  const centroids = [];
-  const N = TRUE_CLUSTERS.length;
-  TRUE_CLUSTERS.forEach((_, i) => {
-    const angle = (i / N) * Math.PI * 2;
-    const r = 0.32;
-    centroids.push({ x: 0.5 + Math.cos(angle) * r, y: 0.5 + Math.sin(angle) * r });
+
+  // Group rows by cluster id.
+  const clusterMap = {};
+  rows.forEach((r) => {
+    const cid = (clusterByRow && clusterByRow[r.id]) || `_solo_${r.id}`;
+    (clusterMap[cid] = clusterMap[cid] || []).push(r.id);
   });
-  TRUE_CLUSTERS.forEach((cluster, i) => {
-    cluster.forEach((rid, j) => {
-      const angle = (j / cluster.length) * Math.PI * 2 + i * 0.31;
-      const spread = cluster.length > 1 ? 0.018 : 0;
+  const clusterIds = Object.keys(clusterMap);
+  const N = clusterIds.length || 1;
+  clusterIds.forEach((cid, i) => {
+    const angle = (i / N) * Math.PI * 2;
+    const cx = 0.5 + Math.cos(angle) * 0.32;
+    const cy = 0.5 + Math.sin(angle) * 0.32;
+    clusterMap[cid].forEach((rid, j) => {
+      const a2 = (j / Math.max(1, clusterMap[cid].length)) * Math.PI * 2 + i * 0.31;
+      const spread = clusterMap[cid].length > 1 ? 0.035 : 0;
       pos[rid] = {
-        x: centroids[i].x + Math.cos(angle) * spread + (rng() - 0.5) * 0.01,
-        y: centroids[i].y + Math.sin(angle) * spread + (rng() - 0.5) * 0.01,
+        x: cx + Math.cos(a2) * spread + (rng() - 0.5) * 0.01,
+        y: cy + Math.sin(a2) * spread + (rng() - 0.5) * 0.01,
       };
     });
   });
@@ -44,29 +58,59 @@ function buildEmbFinal() {
 
 function lerp2(a, b, t) { return a + (b - a) * t; }
 
-// progress 0..1 — interpolates from random to clustered
-// showLabels — show cluster ids
+// progress 0..1 — interpolates from random scatter to clustered layout.
+// Uses real rows from window.__DATA__.graph; shows placeholder if not ready.
 function EmbeddingSpace({ progress = 0, hovered = null, onHover = null, dims = '1024' }) {
   const wrapRef = useRef(null);
   const [size, setSize] = useState({ w: 400, h: 400 });
+  const [tick, setTick] = useState(0);
 
   useEffect(() => {
     const el = wrapRef.current;
     if (!el) return;
-    const ro = new ResizeObserver(() => {
-      const r = el.getBoundingClientRect();
-      setSize({ w: r.width, h: r.height });
-    });
+    const measure = () => setSize({ w: el.offsetWidth, h: el.offsetHeight });
+    const ro = new ResizeObserver(measure);
     ro.observe(el);
-    const r = el.getBoundingClientRect();
-    setSize({ w: r.width, h: r.height });
+    measure();
     return () => ro.disconnect();
   }, []);
 
-  const { p0, p1 } = useMemo(() => ({
-    p0: buildEmbInitial(),
-    p1: buildEmbFinal(),
-  }), []);
+  // Re-render when graph data arrives (dispatched by api.js getGraph).
+  useEffect(() => {
+    const h = () => setTick((t) => t + 1);
+    window.addEventListener('graph-updated', h);
+    return () => window.removeEventListener('graph-updated', h);
+  }, []);
+
+  const graph = window.__DATA__.graph;
+  const rows = (graph && graph.rows) || [];
+  const clusterByRow = (graph && graph.clusterByRow) || {};
+
+  const { p0, p1 } = useMemo(() => {
+    if (rows.length === 0) return { p0: {}, p1: {} };
+    return {
+      p0: buildEmbInitial(rows),
+      p1: buildEmbFinal(rows, clusterByRow),
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rows.length, tick]);
+
+  if (rows.length === 0) {
+    return (
+      <div ref={wrapRef} className="canvas-wrap" style={{
+        width: '100%', height: '100%',
+        background: 'var(--bg-elev)', borderRadius: 'var(--r-lg)',
+        border: '1px solid var(--border)',
+        display: 'grid', placeItems: 'center',
+        color: 'var(--text-4)', fontFamily: 'var(--font-mono)', fontSize: 11.5,
+      }}>
+        <div style={{ textAlign: 'center' }}>
+          <div style={{ marginBottom: 4 }}>эмбеддинги ещё не готовы</div>
+          <div style={{ fontSize: 10.5, opacity: 0.7 }}>появятся после инференса…</div>
+        </div>
+      </div>
+    );
+  }
 
   // ease the progress with a slight overshoot
   const t = Math.max(0, Math.min(1, progress));
@@ -88,8 +132,8 @@ function EmbeddingSpace({ progress = 0, hovered = null, onHover = null, dims = '
 
   // build "trails" — show the path from start to current
   return (
-    <div ref={wrapRef} className="canvas-wrap" style={{ background: 'var(--bg-elev)', borderRadius: 'var(--r-lg)', border: '1px solid var(--border)' }}>
-      <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="xMidYMid meet">
+    <div ref={wrapRef} className="canvas-wrap" style={{ width: '100%', height: '100%', background: 'var(--bg-elev)', borderRadius: 'var(--r-lg)', border: '1px solid var(--border)' }}>
+      <svg width="100%" height="100%" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="xMidYMid meet" style={{ display: 'block' }}>
         <defs>
           <pattern id="emb-grid" width="40" height="40" patternUnits="userSpaceOnUse">
             <path d="M 40 0 L 0 0 0 40" fill="none" stroke="var(--border)" strokeWidth="0.5" opacity="0.5" />
@@ -97,12 +141,15 @@ function EmbeddingSpace({ progress = 0, hovered = null, onHover = null, dims = '
         </defs>
         <rect width={W} height={H} fill="url(#emb-grid)" />
 
-        {/* axes labels */}
-        <text x={M} y={H - 10} fontSize="9" fontFamily="var(--font-mono)" fill="var(--text-4)">
-          dim_1 ({dims}-d → UMAP-2)
+        {/* оси проекции — подписаны по центру каждой стороны */}
+        <text x={W / 2} y={H - 7} textAnchor="middle"
+          fontSize="11" fontFamily="var(--font-mono)" fill="var(--text-4)" letterSpacing="0.04em">
+          UMAP-1 →
         </text>
-        <text x={M + 4} y={M + 4} fontSize="9" fontFamily="var(--font-mono)" fill="var(--text-4)" transform={`rotate(-90, ${M + 4}, ${M + 4})`}>
-          dim_2
+        <text x={13} y={H / 2} textAnchor="middle"
+          fontSize="11" fontFamily="var(--font-mono)" fill="var(--text-4)" letterSpacing="0.04em"
+          transform={`rotate(-90, 13, ${H / 2})`}>
+          UMAP-2 →
         </text>
 
         {/* trails */}
@@ -149,9 +196,12 @@ function LossCurve({ data, height = 80 }) {
   useEffect(() => {
     const el = wrapRef.current;
     if (!el) return;
-    const ro = new ResizeObserver(() => setW(el.getBoundingClientRect().width));
+    // offsetWidth = layout px, immune to the --ui-zoom CSS zoom (getBoundingClientRect
+    // would be zoom-scaled and overflow at high zoom).
+    const measure = () => setW(el.offsetWidth);
+    const ro = new ResizeObserver(measure);
     ro.observe(el);
-    setW(el.getBoundingClientRect().width);
+    measure();
     return () => ro.disconnect();
   }, []);
 

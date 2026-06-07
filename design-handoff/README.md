@@ -13,9 +13,15 @@
 
 ## About the Design Files
 
-Файлы в этом бандле — **дизайн-референсы, сделанные в HTML + React (через CDN, без сборки)**. Это прототип, показывающий нужный внешний вид и поведение. Все данные сейчас — mock, никаких реальных вычислений нет.
+Файлы в этом бандле — **дизайн-референсы, сделанные в HTML + React (через CDN, без сборки)**. Это прототип, показывающий нужный внешний вид и поведение.
 
-**Задача**: подключить этот фронтенд к реальному бэкенду, который вызывает функции из `src/table_unifier/`. Сам React-фронтенд можно либо оставить в HTML-виде (тогда нужен только Python-бэкенд + статика), либо переписать на Vite + React + TypeScript — на выбор.
+**Важно — фронт уже написан под реальный API.** Все 5 экранов уже вызывают `window.API` (файл `api.js`): `uploadFiles`,
+`buildGraph`, `getGraph`, `runInference`, `subscribeRun` (WebSocket), `getClusters`,
+`postDecisions`, `exportUrl`. Никакого `data.js`/setTimeout-мока в боевом фронте нет.
+Единственный мок — `_preview/mock-api.js` — нужен **только** чтобы открыть прототип без
+бэкенда (`_preview/_preview.html`); в production его не подключать.
+
+**Задача**: реализовать бэкенд под эти вызовы (REST + WebSocket, см. спек ниже), который вызывает функции из `src/table_unifier/`, и раздать фронт как статику. Сам React-фронтенд можно либо оставить в HTML-виде (тогда нужен только Python-бэкенд + статика), либо переписать на Vite + React + TypeScript — на выбор.
 
 ## Fidelity
 
@@ -319,14 +325,19 @@ Response: `{ "status": "started" }`. Прогресс — по тому же Web
 
 Нужно добавить вызовы fetch к API и WS-подписки. Сейчас всё мокается через `data.js` и setTimeout-анимации.
 
-## Подключение фронта к бэку (changes к прототипу)
+## Как фронт уже ходит в API (реализуй бэкенд под это)
 
-1. **`data.js`** заменить на `api.js` — функции `uploadFiles()`, `buildGraph()`, `runInference()`, `subscribeRun(runId, onEvent)`, `getClusters()`, `postDecisions()`, `exportTable()`.
-2. **`screen-upload.jsx`**: в `onChange` файлового инпута/`onDrop` — отправлять реальный POST `/sources/upload`. После успеха — сохранять `session_id` и `sources` в стейт.
-3. **`screen-graph.jsx`**: в `useEffect` вызывать `POST /graph/build`, открыть WS на `/runs/{run_id}/stream`, обновлять `phase`/`progress`/`logs` по событиям из стрима (не делать setTimeout-цикл).
-4. **`screen-training.jsx`** (теперь это инференс): то же самое — `POST /infer/run`, подписка на тот же WS-канал. Когда `type=phase` приходит с `l1`/`l2`/`sim`/`cluster` — обновлять `pulseLayer` и `graphProgress`.
-5. **`screen-review.jsx`**: при mount — `GET /runs/{run_id}/clusters`. При нажатии ✓/✗ — складывать локально, при переходе к next screen — `POST /clusters/decisions`.
-6. **`screen-result.jsx`**: кнопки экспорта → `GET /unified.{format}` с `Content-Disposition: attachment`.
+Весь клиентский код уже написан — ничего переписывать на фронте не нужно. Достаточно поднять бэкенд с этими endpoint'ами. Поведение экранов:
+
+1. **`api.js`** — единый клиент: `uploadFiles()`, `buildGraph()`, `getGraph()`, `getEmbeddings()`, `runInference()`, `subscribeRun(runId, onEvent, { kind })`, `getClusters()`, `postDecisions()`, `singlePair()`, `exportUrl()`. Состояние живёт в `window.__STATE__` (sessionStorage) и `window.__DATA__`.
+2. **`screen-upload.jsx`**: на `onChange`/`onDrop` шлёт `POST /api/sources/upload`, сохраняет `session_id` и `sources`. Список файлов восстанавливается из `__DATA__.sources` (переживает релоад/возврат).
+3. **`screen-graph.jsx`**: если `runId` ещё нет — `POST /api/graph/build`; затем WS `subscribeRun(runId, fn, { kind: 'build' })`. Ждёт фазы `embed`/`tokenize`/`build` и финальное событие **`graph_done`** (`{n_rows, n_tokens, n_edges}`), после чего тянет `GET /api/runs/{run_id}/graph`. **Если граф уже в памяти — сборка не перезапускается** (экран сразу в состоянии done).
+4. **`screen-training.jsx`** (инференс): если инференс ещё не отработан — `POST /api/infer/run` + WS `subscribeRun(runId, fn, { kind: 'infer' })`. На `type=phase` с `l1`/`l2`/`sim`/`cluster` обновляет `pulseLayer`/`graphProgress`; на `type=done` тянет `GET /api/runs/{run_id}/clusters`. **Повторный вход на экран не перезапускает инференс** — явный перезапуск только кнопкой «↻ перезапустить».
+5. **`screen-review.jsx`**: при mount — `GET /api/runs/{run_id}/clusters` (если кандидатов ещё нет). Решения ✓/✗ копятся локально, на переходе дальше — `POST /api/runs/{run_id}/clusters/decisions`.
+6. **`screen-result.jsx`**: кнопки экспорта → `GET /api/runs/{run_id}/unified.{format}` (с `Content-Disposition: attachment`).
+
+### Важно про WebSocket `?kind=`
+Оба экрана (граф и инференс) подписываются на один канал `run_id`, но с разным query-параметром: `…/stream?kind=build` и `…/stream?kind=infer`. Бэкенд может использовать это, чтобы решить, какую фазу пайплайна реплеить. Событие сборки графа — `graph_done` (не `done`); событие конца инференса — `done`.
 
 ## Design Tokens
 
@@ -451,10 +462,12 @@ Response: `{ "status": "started" }`. Прогресс — по тому же Web
 
 ## Файлы дизайна
 
-- `index.html` — основной shell (порядок загрузки скриптов важен!)
-- `styles.css` — все design tokens + классы
-- `data.js` — **МОК-ДАННЫЕ — заменить на api.js**
-- `ui.jsx` — Sidebar, Topbar, StatusBar, Tabs, ScreenFooter, ColorSwatch
+Все файлы фронта лежат в корне пакета (раньше была папка `design/` — удалена, это был устаревший дубль):
+
+- `index.html` — боевой shell (грузит `api.js` + экраны; порядок загрузки важен!)
+- `api.js` — **реальный API-клиент** (REST + WebSocket). Это то, под что пишется бэкенд.
+- `styles.css` — все design tokens + классы (тёмная + светлая темы)
+- `ui.jsx` — Sidebar, Topbar, StatusBar, Tabs, ScreenFooter, ColorSwatch, тема/масштаб
 - `graph-viz.jsx` — `HeteroGraph` компонент + layout helpers
 - `embedding-viz.jsx` — `EmbeddingSpace`, `LossCurve`
 - `screen-upload.jsx` — экран 1
@@ -463,6 +476,7 @@ Response: `{ "status": "started" }`. Прогресс — по тому же Web
 - `screen-review.jsx` — экран 4
 - `screen-result.jsx` — экран 5
 - `app.jsx` — top-level App + роутинг между шагами
+- `_preview/` — **только для превью без бэкенда**: `_preview.html` + `mock-api.js` (имитирует `window.API`). В production не подключать.
 
 ## Чеклист реализации
 
@@ -476,9 +490,10 @@ Response: `{ "status": "started" }`. Прогресс — по тому же Web
 - [ ] `GET /runs/{run_id}/clusters` — результаты + метрики
 - [ ] `POST /clusters/decisions` — пользовательские approve/reject
 - [ ] `GET /unified.{format}` — экспорт с конфликт-резолюшеном
-- [ ] Заменить `data.js` на `api.js` во фронте
-- [ ] Перевести все 5 экранов на реальные fetch + WS
-- [ ] Сервер раздаёт фронт как статику (`StaticFiles` mount на `/`)
+- [x] ~~Заменить `data.js` на `api.js` во фронте~~ — уже сделано (`api.js`)
+- [x] ~~Перевести все 5 экранов на реальные fetch + WS~~ — уже сделано (экраны вызывают `window.API`)
+- [ ] **Все endpoint'ы под префиксом `/api`** (клиент ходит в `/api/sources/upload`, `/api/graph/build`, `/api/infer/run`, `/api/runs/{id}/…`, WS `/api/ws/runs/{id}/stream?kind=build|infer`)
+- [ ] Сервер раздаёт фронт как статику (`StaticFiles` mount на `/`) — берём корневые файлы (без `_preview/`)
 - [ ] Документировать запуск в `README.md` (uvicorn + Ollama хост)
 - [ ] Опционально: Dockerfile с CUDA-base image
 

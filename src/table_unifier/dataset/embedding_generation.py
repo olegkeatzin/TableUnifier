@@ -99,6 +99,7 @@ def generate_column_embeddings(
     columns: list[str] | None = None,
     existing: dict[str, np.ndarray] | None = None,
     embed_batch_size: int = 32,
+    timings: dict[str, float] | None = None,
 ) -> dict[str, np.ndarray]:
     """Для каждого столбца: описание (LLM) → embedding (батч).
 
@@ -109,6 +110,10 @@ def generate_column_embeddings(
         existing: уже готовые эмбеддинги (например, загруженные из npz).
             Колонки из этого словаря пропускаются — эмбеддируются только новые.
         embed_batch_size: сколько описаний отправлять в одном embed_batch запросе.
+        timings: опциональный out-словарь. Если передан, в него аккумулируются
+            (через ``+=``) тайминги стадий в мс: ``descriptions_ms`` (LLM-описания)
+            и ``embed_ms`` (эмбеддинг). Используется веб-сервером для панели
+            «время выполнения»; на поведение функции не влияет.
 
     Returns:
         ``{col_name: np.ndarray[4096]}``. Включает все existing + новые.
@@ -124,13 +129,20 @@ def generate_column_embeddings(
         logger.info("  доэмбеддивание %d/%d колонок (остальные уже есть)", len(todo), len(columns))
 
     # Шаг 1: LLM-описания — последовательно (Ollama ограничение)
+    _t_desc = time.perf_counter()
     descriptions: list[tuple[str, str]] = []  # (col_name, description)
     for col in tqdm(todo, desc="Column descriptions"):
         desc = _describe_column(client, col, df)
         descriptions.append((col, desc))
         logger.debug("  col '%s' → %s", col, desc[:60])
+    if timings is not None:
+        timings["descriptions_ms"] = (
+            timings.get("descriptions_ms", 0.0)
+            + (time.perf_counter() - _t_desc) * 1000
+        )
 
     # Шаг 2: embedding батчами
+    _t_embed = time.perf_counter()
     n_failed = 0
     for batch_start in tqdm(range(0, len(descriptions), embed_batch_size),
                             desc="Column embed batches", unit="batch"):
@@ -150,6 +162,12 @@ def generate_column_embeddings(
                 except Exception as e2:
                     logger.error("  col '%s': ошибка embed — пропускаем. %s", col, e2)
                     n_failed += 1
+
+    if timings is not None:
+        timings["embed_ms"] = (
+            timings.get("embed_ms", 0.0)
+            + (time.perf_counter() - _t_embed) * 1000
+        )
 
     if n_failed:
         logger.warning("generate_column_embeddings: %d/%d колонок пропущено из-за ошибок",

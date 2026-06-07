@@ -237,7 +237,7 @@ function ScreenTraining({ onContinue, onBack }) {
                 <div><span style={{ color: 'var(--text-4)' }}>layers:</span> 2 × GATv2Conv (heads=4)</div>
                 <div><span style={{ color: 'var(--text-4)' }}>row_dim:</span> 1024 (bge-m3)</div>
                 <div><span style={{ color: 'var(--text-4)' }}>edge_attr:</span> 1024 (col_emb MRL)</div>
-                <div><span style={{ color: 'var(--text-4)' }}>checkpoint:</span> v14_mrl_gat_model.pt</div>
+                <div><span style={{ color: 'var(--text-4)' }}>checkpoint:</span> v17_views_gat_model.pt</div>
               </div>
             </div>
 

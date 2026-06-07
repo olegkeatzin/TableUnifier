@@ -68,13 +68,10 @@ function EmbeddingSpace({ progress = 0, hovered = null, onHover = null, dims = '
   useEffect(() => {
     const el = wrapRef.current;
     if (!el) return;
-    const ro = new ResizeObserver(() => {
-      const r = el.getBoundingClientRect();
-      setSize({ w: r.width, h: r.height });
-    });
+    const measure = () => setSize({ w: el.offsetWidth, h: el.offsetHeight });
+    const ro = new ResizeObserver(measure);
     ro.observe(el);
-    const r = el.getBoundingClientRect();
-    setSize({ w: r.width, h: r.height });
+    measure();
     return () => ro.disconnect();
   }, []);
 
@@ -101,6 +98,7 @@ function EmbeddingSpace({ progress = 0, hovered = null, onHover = null, dims = '
   if (rows.length === 0) {
     return (
       <div ref={wrapRef} className="canvas-wrap" style={{
+        width: '100%', height: '100%',
         background: 'var(--bg-elev)', borderRadius: 'var(--r-lg)',
         border: '1px solid var(--border)',
         display: 'grid', placeItems: 'center',
@@ -134,8 +132,8 @@ function EmbeddingSpace({ progress = 0, hovered = null, onHover = null, dims = '
 
   // build "trails" — show the path from start to current
   return (
-    <div ref={wrapRef} className="canvas-wrap" style={{ background: 'var(--bg-elev)', borderRadius: 'var(--r-lg)', border: '1px solid var(--border)' }}>
-      <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="xMidYMid meet">
+    <div ref={wrapRef} className="canvas-wrap" style={{ width: '100%', height: '100%', background: 'var(--bg-elev)', borderRadius: 'var(--r-lg)', border: '1px solid var(--border)' }}>
+      <svg width="100%" height="100%" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="xMidYMid meet" style={{ display: 'block' }}>
         <defs>
           <pattern id="emb-grid" width="40" height="40" patternUnits="userSpaceOnUse">
             <path d="M 40 0 L 0 0 0 40" fill="none" stroke="var(--border)" strokeWidth="0.5" opacity="0.5" />
@@ -143,12 +141,15 @@ function EmbeddingSpace({ progress = 0, hovered = null, onHover = null, dims = '
         </defs>
         <rect width={W} height={H} fill="url(#emb-grid)" />
 
-        {/* axes labels */}
-        <text x={M} y={H - 10} fontSize="9" fontFamily="var(--font-mono)" fill="var(--text-4)">
-          dim_1 ({dims}-d → UMAP-2)
+        {/* оси проекции — подписаны по центру каждой стороны */}
+        <text x={W / 2} y={H - 7} textAnchor="middle"
+          fontSize="11" fontFamily="var(--font-mono)" fill="var(--text-4)" letterSpacing="0.04em">
+          UMAP-1 →
         </text>
-        <text x={M + 4} y={M + 4} fontSize="9" fontFamily="var(--font-mono)" fill="var(--text-4)" transform={`rotate(-90, ${M + 4}, ${M + 4})`}>
-          dim_2
+        <text x={13} y={H / 2} textAnchor="middle"
+          fontSize="11" fontFamily="var(--font-mono)" fill="var(--text-4)" letterSpacing="0.04em"
+          transform={`rotate(-90, 13, ${H / 2})`}>
+          UMAP-2 →
         </text>
 
         {/* trails */}
@@ -195,9 +196,12 @@ function LossCurve({ data, height = 80 }) {
   useEffect(() => {
     const el = wrapRef.current;
     if (!el) return;
-    const ro = new ResizeObserver(() => setW(el.getBoundingClientRect().width));
+    // offsetWidth = layout px, immune to the --ui-zoom CSS zoom (getBoundingClientRect
+    // would be zoom-scaled and overflow at high zoom).
+    const measure = () => setW(el.offsetWidth);
+    const ro = new ResizeObserver(measure);
     ro.observe(el);
-    setW(el.getBoundingClientRect().width);
+    measure();
     return () => ro.disconnect();
   }, []);
 
