@@ -307,7 +307,7 @@ function HeteroGraph({
           return (
             <line key={i}
               x1={r.x} y1={r.y} x2={t.x} y2={t.y}
-              stroke={isSel ? 'var(--row)' : 'var(--edge)'}
+              stroke={isSel ? 'var(--warn)' : 'var(--edge)'}
               strokeWidth={sw}
               opacity={op} />
           );
@@ -373,7 +373,7 @@ function HeteroGraph({
           const isA = r.source === 'A';
           const isSel = selected === r.id;
           const isClusterMate = selectedClusterMates.has(r.id) && r.id !== selected;
-          const fill = isSel ? 'var(--warn)' : (isA ? 'var(--row)' : 'var(--token)');
+          const fill = isSel ? 'var(--warn)' : (isA ? 'var(--row)' : 'var(--row-b)');
           const sz = isSel ? 16 : 10;
           return (
             <g key={`r-${r.id}`}
@@ -421,10 +421,10 @@ function HeteroGraph({
             </button>
           </div>
           <div className="row-l"><span className="swatch sq" style={{ background: 'var(--row)' }}></span> строка · таблица A ({aCount})</div>
-          <div className="row-l"><span className="swatch sq" style={{ background: 'var(--token)' }}></span> строка · таблица B ({bCount})</div>
+          <div className="row-l"><span className="swatch sq" style={{ background: 'var(--row-b)' }}></span> строка · таблица B ({bCount})</div>
           <div className="row-l"><span className="swatch" style={{ background: 'var(--surface-2)', border: '1px solid var(--border-strong)' }}></span> токен ({graph.tokens.length})</div>
           <div className="legend-weight">
-            <span className="wlabel">вес ребра · IDF</span>
+            <span className="wlabel">вес ребра · GAT attention</span>
             <span className="wramp">
               <svg width="56" height="10" viewBox="0 0 56 10" preserveAspectRatio="none" style={{ display: 'block', width: 56, height: 10, flexShrink: 0 }}>
                 <polygon points="0,5 56,0.5 56,9.5" fill="var(--edge)" />
@@ -469,7 +469,7 @@ function HoverTooltip({ tip, graph, canvasW, canvasH, edgesByRow, edgesByToken }
     const row = graph.rows.find((r) => r.id === tip.id);
     if (!row) return null;
     const isA = row.source === 'A';
-    const accent = isA ? 'var(--row)' : 'var(--token)';
+    const accent = isA ? 'var(--row)' : 'var(--row-b)';
     const colsArr = Object.entries(row.cols || {})
       .filter(([k, v]) => k !== 'id' && v != null && String(v) !== '')
       .slice(0, 8);
@@ -526,7 +526,7 @@ function HoverTooltip({ tip, graph, canvasW, canvasH, edgesByRow, edgesByToken }
                 const isA = r && r.source === 'A';
                 return (
                   <tr key={i} style={{ borderTop: i > 0 ? '1px solid var(--border)' : 'none' }}>
-                    <td style={{ padding: '3px 6px', color: isA ? 'var(--row)' : 'var(--token)', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{e.row}</td>
+                    <td style={{ padding: '3px 6px', color: isA ? 'var(--row)' : 'var(--row-b)', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{e.row}</td>
                     <td style={{ padding: '3px 6px', color: 'var(--text-3)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{e.col}</td>
                     <td style={{ padding: '3px 6px', color: 'var(--text)', textAlign: 'right', width: 38 }}>{typeof e.weight === 'number' ? e.weight.toFixed(2) : '—'}</td>
                   </tr>

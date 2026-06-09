@@ -14,19 +14,21 @@
   --text-4: oklch(0.42 0.010 250);
 
   /* accents — shared chroma 0.15, lightness 0.72 */
-  --row: oklch(0.72 0.15 248);     /* blue — row nodes */
-  --token: oklch(0.72 0.15 295);   /* purple — token nodes */
+  --row: oklch(0.72 0.15 248);     /* blue — table A row nodes */
+  --row-b: oklch(0.65 0.21 22);    /* red — table B row nodes (high contrast vs blue) */
+  --token: oklch(0.80 0.015 90);   /* neutral warm gray — token nodes (vocabulary scaffolding, not a table) */
   --cluster: oklch(0.78 0.15 152); /* green — confirmed cluster */
   --warn: oklch(0.80 0.15 75);     /* amber — needs review */
   --bad: oklch(0.70 0.16 25);      /* red — rejected */
 
   --row-soft: color-mix(in oklch, var(--row) 18%, transparent);
+  --row-b-soft: color-mix(in oklch, var(--row-b) 18%, transparent);
   --token-soft: color-mix(in oklch, var(--token) 18%, transparent);
   --cluster-soft: color-mix(in oklch, var(--cluster) 18%, transparent);
   --warn-soft: color-mix(in oklch, var(--warn) 18%, transparent);
 
   /* graph edge base color — weight ramps width + opacity on top */
-  --edge: oklch(0.52 0.012 250);
+  --edge: oklch(0.52 0.008 90);
   /* radial backdrop center behind the graph canvas */
   --canvas-center: oklch(0.20 0.008 250);
   /* text/icons placed ON an accent-colored fill */
@@ -96,7 +98,7 @@ body {
 }
 .topbar .brand-mark {
   width: 22px; height: 22px; border-radius: 5px;
-  background: linear-gradient(135deg, var(--row), var(--token));
+  background: linear-gradient(135deg, var(--row), var(--row-b));
   position: relative;
 }
 .topbar .brand-mark::before, .topbar .brand-mark::after {
@@ -336,7 +338,7 @@ body {
 .dt tr:hover td { background: var(--surface); }
 .dt .nrow { color: var(--text-4); font-size: 10.5px; width: 28px; text-align: right; padding-right: 6px; }
 .dt .src-a { color: var(--row); }
-.dt .src-b { color: var(--token); }
+.dt .src-b { color: var(--row-b); }
 .dt .hex { color: var(--text); }
 .dt .diff { background: color-mix(in oklch, var(--warn) 14%, transparent); }
 
@@ -373,8 +375,8 @@ body {
 .chip .dot { width: 6px; height: 6px; border-radius: 50%; }
 .chip.row { color: var(--row); border-color: color-mix(in oklch, var(--row) 40%, var(--border)); }
 .chip.row .dot { background: var(--row); }
-.chip.token { color: var(--token); border-color: color-mix(in oklch, var(--token) 40%, var(--border)); }
-.chip.token .dot { background: var(--token); }
+.chip.token { color: var(--row-b); border-color: color-mix(in oklch, var(--row-b) 40%, var(--border)); }
+.chip.token .dot { background: var(--row-b); }
 .chip.cluster { color: var(--cluster); border-color: color-mix(in oklch, var(--cluster) 40%, var(--border)); }
 .chip.cluster .dot { background: var(--cluster); }
 .chip.warn { color: var(--warn); border-color: color-mix(in oklch, var(--warn) 40%, var(--border)); }
@@ -644,17 +646,19 @@ body {
 
   /* accents — darker + a touch more chroma for contrast on light */
   --row: oklch(0.55 0.17 248);
-  --token: oklch(0.55 0.18 295);
+  --row-b: oklch(0.54 0.21 22);
+  --token: oklch(0.52 0.015 90);   /* neutral warm gray — readable on light bg */
   --cluster: oklch(0.56 0.15 152);
   --warn: oklch(0.62 0.15 75);
   --bad: oklch(0.55 0.19 25);
 
   --row-soft: color-mix(in oklch, var(--row) 14%, transparent);
+  --row-b-soft: color-mix(in oklch, var(--row-b) 14%, transparent);
   --token-soft: color-mix(in oklch, var(--token) 14%, transparent);
   --cluster-soft: color-mix(in oklch, var(--cluster) 14%, transparent);
   --warn-soft: color-mix(in oklch, var(--warn) 16%, transparent);
 
-  --edge: oklch(0.66 0.020 250);
+  --edge: oklch(0.66 0.012 90);
   --canvas-center: oklch(0.955 0.006 250);
   --on-accent: oklch(0.99 0.004 250);
 

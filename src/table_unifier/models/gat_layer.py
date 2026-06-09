@@ -72,9 +72,22 @@ class GATLayer(nn.Module):
         edge_attr_t2r: torch.Tensor,
         r2t_edge_index: torch.Tensor,
         edge_attr_r2t: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return_attention: bool = False,
+    ):
+        """Returns (row_x, token_x) либо (row_x, token_x, attn_t2r), если
+        return_attention=True. attn_t2r — коэффициенты внимания token→row,
+        форма [num_edges, num_heads], выровнены 1:1 с t2r_edge_index
+        (add_self_loops=False, поэтому порядок рёбер сохраняется).
+        """
         # Token → Row
-        row_msg = self.conv_t2r((token_x, row_x), t2r_edge_index, edge_attr_t2r)
+        if return_attention:
+            row_msg, (_, attn_t2r) = self.conv_t2r(
+                (token_x, row_x), t2r_edge_index, edge_attr_t2r,
+                return_attention_weights=True,
+            )
+        else:
+            row_msg = self.conv_t2r((token_x, row_x), t2r_edge_index, edge_attr_t2r)
+            attn_t2r = None
         row_x = self.norm_row(row_x + self.dropout(row_msg))
 
         # Row → Token (если bidirectional)
@@ -82,4 +95,6 @@ class GATLayer(nn.Module):
             token_msg = self.conv_r2t((row_x, token_x), r2t_edge_index, edge_attr_r2t)
             token_x = self.norm_token(token_x + self.dropout(token_msg))
 
+        if return_attention:
+            return row_x, token_x, attn_t2r
         return row_x, token_x

@@ -210,8 +210,14 @@
         cols: res.table_b.cols, data: res.table_b.data,
       };
     }
+    // После инференса перезапросим граф: рёбра теперь несут attention-веса
+    // GAT (толщина/прозрачность). До этого вес был не определён.
+    let g = window.__DATA__.graph;
+    if (g) {
+      try { await getGraph(runId); } catch (e) { /* граф мог истечь — не критично */ }
+      g = window.__DATA__.graph;
+    }
     // Прокинем cluster_id в graph (для clustered-layout в HeteroGraph).
-    const g = window.__DATA__.graph;
     if (g) {
       const byRow = {};
       for (const c of (res.candidates || [])) {

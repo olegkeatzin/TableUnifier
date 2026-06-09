@@ -14,11 +14,41 @@ function classifyPair(sim, threshold) {
   return 'reject';
 }
 
-function ScreenReview({ onContinue, onBack, decisions, setDecisions }) {
+// Подбор порога под решения пользователя: «объединить» → пара должна быть выше
+// порога, «разделить» → ниже. Перебираем порог по сетке [0.50..0.99] и берём тот,
+// что даёт меньше всего противоречий с решениями; при равенстве — ближайший к
+// текущему (порог не прыгает без нужды). Корректно работает и на односторонних
+// решениях. Возвращает null, если решений нет.
+const THR_MIN = 0.5, THR_MAX = 0.99, THR_STEP = 0.01, THR_LAMBDA = 0.25;
+function suggestThreshold(candidates, decisions, current) {
+  const pos = [], neg = [];
+  for (const c of candidates) {
+    const d = decisions[pairKey(c)];
+    if (d === 'approve') pos.push(pairSim(c));
+    else if (d === 'reject') neg.push(pairSim(c));
+  }
+  if (pos.length + neg.length === 0) return null;
+  const cur = (typeof current === 'number') ? current : (THR_MIN + THR_MAX) / 2;
+  let best = cur, bestCost = Infinity;
+  const steps = Math.round((THR_MAX - THR_MIN) / THR_STEP);
+  for (let i = 0; i <= steps; i++) {
+    const t = THR_MIN + i * THR_STEP;
+    let err = 0;
+    for (const s of pos) if (s < t) err++;       // одобрено, но оказалось ниже порога
+    for (const s of neg) if (s >= t) err++;       // отклонено, но оказалось выше порога
+    const cost = err + THR_LAMBDA * Math.abs(t - cur);
+    if (cost < bestCost - 1e-9) { bestCost = cost; best = t; }
+  }
+  return Math.round(best * 100) / 100;
+}
+
+function ScreenReview({ onContinue, onBack, decisions, setDecisions, threshold, setThreshold,
+                        autoThreshold, setAutoThreshold }) {
   const D = window.__DATA__;
   const [filter, setFilter] = useState('all');
   const [activePair, setActivePair] = useState(null);
-  const [threshold, setThreshold] = useState(D.metrics?.threshold || 0.831);
+  // Порог общий с окном «Инференс» (App-state). null → дефолт из инференса.
+  const effThreshold = (typeof threshold === 'number') ? threshold : (D.metrics?.threshold || 0.831);
 
   // Если данных нет — попробуем подтянуть.
   useEffect(() => {
@@ -28,7 +58,20 @@ function ScreenReview({ onContinue, onBack, decisions, setDecisions }) {
   }, []);
 
   const allCandidates = D.candidates || [];
-  const verdictOf = (c) => classifyPair(pairSim(c), threshold);
+
+  // Рекомендованный порог по текущим решениям (null — решений ещё нет).
+  const recommended = suggestThreshold(allCandidates, decisions, effThreshold);
+  const recDiffers = recommended != null && Math.abs(recommended - effThreshold) > 1e-9;
+
+  // Авто-режим: как только меняются решения (или включают тумблер) — подстраиваем
+  // порог под рекомендацию. Зависимость от `recommended`, а не от порога, исключает
+  // петлю: после применения recommended === effThreshold и эффект больше не срабатывает.
+  useEffect(() => {
+    if (autoThreshold && recDiffers) setThreshold(recommended);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoThreshold, recommended]);
+
+  const verdictOf = (c) => classifyPair(pairSim(c), effThreshold);
   const filtered = allCandidates.filter((c) => filter === 'all' || verdictOf(c) === filter);
 
   const counts = {
@@ -82,12 +125,60 @@ function ScreenReview({ onContinue, onBack, decisions, setDecisions }) {
           </div>
 
           <div style={{ marginTop: 20 }}>
-            <div style={{ fontSize: 10.5, color: 'var(--text-4)', textTransform: 'uppercase', letterSpacing: 0.06, marginBottom: 8 }}>порог сходства</div>
-            <div style={{ fontFamily: 'var(--font-mono)', fontSize: 18, fontWeight: 500, marginBottom: 4 }}>{threshold.toFixed(2)}</div>
-            <input type="range" min={0.5} max={0.99} step={0.01} value={threshold}
-              className="range" onChange={(e) => setThreshold(parseFloat(e.target.value))} />
+            <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: 8 }}>
+              <div style={{ fontSize: 10.5, color: 'var(--text-4)', textTransform: 'uppercase', letterSpacing: 0.06 }}>порог сходства</div>
+              {recommended != null && (
+                <span className="mono" style={{ fontSize: 10, color: 'var(--text-4)' }} title="подобран по вашим решениям">
+                  реком. <b style={{ color: recDiffers ? 'var(--warn)' : 'var(--cluster)' }}>{recommended.toFixed(2)}</b>
+                </span>
+              )}
+            </div>
+            <div style={{ fontFamily: 'var(--font-mono)', fontSize: 18, fontWeight: 500, marginBottom: 4 }}>{effThreshold.toFixed(2)}</div>
+            <div style={{ position: 'relative' }}>
+              <input type="range" min={0.5} max={0.99} step={0.01} value={effThreshold}
+                className="range" onChange={(e) => setThreshold(parseFloat(e.target.value))} />
+              {recommended != null && (
+                <div title={`рекомендованный порог ${recommended.toFixed(2)}`}
+                  style={{
+                    position: 'absolute', top: -3, bottom: -3,
+                    left: `${Math.max(0, Math.min(100, (recommended - 0.5) / 0.49 * 100))}%`,
+                    width: 2, transform: 'translateX(-1px)',
+                    background: recDiffers ? 'var(--warn)' : 'var(--cluster)',
+                    borderRadius: 1, pointerEvents: 'none', opacity: 0.85,
+                  }}></div>
+              )}
+            </div>
             <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 4, fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-4)' }}>
               <span>0.50</span><span>порог</span><span>0.99</span>
+            </div>
+
+            {/* авто-подстройка порога под решения «объединить»/«разделить» */}
+            <div style={{ marginTop: 12, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 7, cursor: 'pointer', fontSize: 11.5, color: 'var(--text-2)' }}>
+                <input type="checkbox" checked={!!autoThreshold}
+                  onChange={(e) => setAutoThreshold(e.target.checked)}
+                  style={{ accentColor: 'var(--cluster)', cursor: 'pointer' }} />
+                авто-подстройка порога
+              </label>
+              {autoThreshold ? (
+                <span className="mono" style={{ fontSize: 10, color: 'var(--cluster)' }}>следует за решениями</span>
+              ) : (
+                <button className="btn ghost"
+                  style={{ height: 24, padding: '0 8px', fontSize: 11, opacity: recDiffers ? 1 : 0.45 }}
+                  disabled={!recDiffers}
+                  onClick={() => recommended != null && setThreshold(recommended)}>
+                  применить{recDiffers ? ` ${recommended.toFixed(2)}` : ''}
+                </button>
+              )}
+            </div>
+            <div style={{ marginTop: 6, fontSize: 10.5, color: 'var(--text-4)', lineHeight: 1.5 }}>
+              {recommended == null
+                ? 'отметьте «объединить»/«разделить» — порог подстроится под ваши решения'
+                : autoThreshold
+                  ? 'порог автоматически отделяет ваши «объединить» от «разделить»'
+                  : recDiffers
+                    ? 'рекомендация по решениям отличается от текущего порога'
+                    : 'текущий порог согласуется с вашими решениями'}
             </div>
           </div>
 
@@ -96,7 +187,7 @@ function ScreenReview({ onContinue, onBack, decisions, setDecisions }) {
             <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-2)', lineHeight: 1.6 }}>
               <div><span style={{ color: 'var(--text-4)' }}>метод:</span> компоненты связности</div>
               <div><span style={{ color: 'var(--text-4)' }}>метрика:</span> косинусная</div>
-              <div><span style={{ color: 'var(--text-4)' }}>порог:</span> <b style={{ color: 'var(--text)' }}>{threshold.toFixed(3)}</b></div>
+              <div><span style={{ color: 'var(--text-4)' }}>порог:</span> <b style={{ color: 'var(--text)' }}>{effThreshold.toFixed(3)}</b></div>
             </div>
           </div>
 
@@ -117,7 +208,7 @@ function ScreenReview({ onContinue, onBack, decisions, setDecisions }) {
               <PairCard
                 key={pairKey(c)}
                 cand={c}
-                threshold={threshold}
+                threshold={effThreshold}
                 decision={decisions[pairKey(c)]}
                 onDecide={(v) => setDecisions({ ...decisions, [pairKey(c)]: v })}
                 onSelect={() => setActivePair(c)}

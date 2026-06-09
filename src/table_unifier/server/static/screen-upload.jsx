@@ -124,11 +124,11 @@ function ScreenUpload({ onContinue }) {
                 }}>
                   <div style={{
                     width: 22, height: 22, borderRadius: 5,
-                    background: f.ref === 'A' ? 'var(--row-soft)' : f.ref === 'B' ? 'var(--token-soft)' : 'var(--surface)',
+                    background: f.ref === 'A' ? 'var(--row-soft)' : f.ref === 'B' ? 'var(--row-b-soft)' : 'var(--surface)',
                     border: '1px solid var(--border-strong)',
                     display: 'grid', placeItems: 'center',
                     fontFamily: 'var(--font-mono)', fontSize: 9, fontWeight: 600,
-                    color: f.ref === 'A' ? 'var(--row)' : f.ref === 'B' ? 'var(--token)' : 'var(--text-3)',
+                    color: f.ref === 'A' ? 'var(--row)' : f.ref === 'B' ? 'var(--row-b)' : 'var(--text-3)',
                   }}>{f.ref || '?'}</div>
                   <div style={{ flex: 1, overflow: 'hidden' }}>
                     <div style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
@@ -182,7 +182,7 @@ function ScreenUpload({ onContinue }) {
         {tableA && tableB && (
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, minHeight: 220, flex: 1 }}>
             <TablePreview tbl={tableA} accentColor="var(--row)" />
-            <TablePreview tbl={tableB} accentColor="var(--token)" />
+            <TablePreview tbl={tableB} accentColor="var(--row-b)" />
           </div>
         )}
       </div>

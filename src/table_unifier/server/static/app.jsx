@@ -9,25 +9,33 @@ function _loadApp() {
     if (!raw) return null;
     const obj = JSON.parse(raw);
     return { step: obj.step || 0, completed: new Set(obj.completed || []),
-             reviewDecisions: obj.reviewDecisions || {} };
+             reviewDecisions: obj.reviewDecisions || {},
+             reviewThreshold: (typeof obj.reviewThreshold === 'number') ? obj.reviewThreshold : null,
+             autoThreshold: !!obj.autoThreshold };
   } catch (_e) { return null; }
 }
-function _saveApp(step, completed, reviewDecisions) {
+function _saveApp(step, completed, reviewDecisions, reviewThreshold, autoThreshold) {
   try {
     sessionStorage.setItem(APP_KEY, JSON.stringify({
-      step, completed: [...completed], reviewDecisions,
+      step, completed: [...completed], reviewDecisions, reviewThreshold, autoThreshold,
     }));
   } catch (_e) { /* noop */ }
 }
 
 function App() {
-  const _saved = _loadApp() || { step: 0, completed: new Set(), reviewDecisions: {} };
+  const _saved = _loadApp() || { step: 0, completed: new Set(), reviewDecisions: {}, reviewThreshold: null, autoThreshold: false };
   const [step, setStep] = useState(_saved.step);
   const [completed, setCompleted] = useState(_saved.completed);
   const [reviewDecisions, setReviewDecisions] = useState(_saved.reviewDecisions);
+  // Общий порог сходства: null → берётся из metrics.threshold инференса,
+  // как только пользователь двигает слайдер в окне «Проверка», значение
+  // фиксируется и используется и в окне «Инференс» (рёбра + гистограмма).
+  const [reviewThreshold, setReviewThreshold] = useState(_saved.reviewThreshold);
+  // Авто-подстройка порога под решения «объединить/разделить» в окне «Проверка».
+  const [autoThreshold, setAutoThreshold] = useState(_saved.autoThreshold);
   const [, _tick] = useState(0);
-  useEffect(() => { _saveApp(step, completed, reviewDecisions); },
-            [step, completed, reviewDecisions]);
+  useEffect(() => { _saveApp(step, completed, reviewDecisions, reviewThreshold, autoThreshold); },
+            [step, completed, reviewDecisions, reviewThreshold, autoThreshold]);
   // Re-render the shell (so sidebar stats track live graph data) when API
   // populates __DATA__.graph / clusters.
   useEffect(() => {
@@ -47,6 +55,8 @@ function App() {
     setCompleted(new Set());
     setStep(0);
     setReviewDecisions({});
+    setReviewThreshold(null);
+    setAutoThreshold(false);
     // Сбрасываем серверное состояние (включая sessionStorage),
     // чтобы следующий цикл создал новый run с нуля.
     if (window.__STATE_RESET__) window.__STATE_RESET__();
@@ -84,10 +94,16 @@ function App() {
       <div className="main">
         {step === 0 && <ScreenUpload onContinue={advance} />}
         {step === 1 && <ScreenGraph    onBack={goBack} onContinue={advance} />}
-        {step === 2 && <ScreenTraining onBack={goBack} onContinue={advance} />}
+        {step === 2 && <ScreenTraining onBack={goBack} onContinue={advance}
+                                       threshold={reviewThreshold}
+                                       setThreshold={setReviewThreshold} />}
         {step === 3 && <ScreenReview   onBack={goBack} onContinue={advance}
                                        decisions={reviewDecisions}
-                                       setDecisions={setReviewDecisions} />}
+                                       setDecisions={setReviewDecisions}
+                                       threshold={reviewThreshold}
+                                       setThreshold={setReviewThreshold}
+                                       autoThreshold={autoThreshold}
+                                       setAutoThreshold={setAutoThreshold} />}
         {step === 4 && <ScreenResult   onBack={goBack} onRestart={reset}
                                        decisions={reviewDecisions} />}
         <StatusBar stepIdx={step} running={running} />

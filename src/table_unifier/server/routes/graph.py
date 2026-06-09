@@ -129,16 +129,26 @@ def get_graph(run_id: str) -> dict:
     while len(col_names) < n_cols:
         col_names.append(f"col_{len(col_names)}")
 
+    # Вес ребра = внимание GAT (token→row), посчитанное при инференсе.
+    # До инференса run.edge_attention=None → weight=None, и фронт рисует рёбра
+    # нейтральной толщиной (вес ещё не определён).
+    edge_attention = getattr(run, "edge_attention", None)
+    has_attention = (
+        edge_attention is not None
+        and len(edge_attention) == edge_index.shape[1]
+    )
+
     src_arr = edge_index[0]
     dst_arr = edge_index[1]
     for k in range(edge_index.shape[1]):
         col_name = col_names[int(edge_col_idx[k])]
         src_token = int(src_arr[k])
         dst_row = int(dst_arr[k])
+        weight = float(edge_attention[k]) if has_attention else None
         edges_out.append({
             "row": rows_out[dst_row]["id"],
             "token": tokens_out[src_token]["id"],
-            "col": col_name, "weight": 1.0,
+            "col": col_name, "weight": weight,
         })
 
     return {"rows": rows_out, "tokens": tokens_out, "edges": edges_out,

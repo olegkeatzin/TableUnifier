@@ -60,10 +60,12 @@ function lerp2(a, b, t) { return a + (b - a) * t; }
 
 // progress 0..1 — interpolates from random scatter to clustered layout.
 // Uses real rows from window.__DATA__.graph; shows placeholder if not ready.
-function EmbeddingSpace({ progress = 0, hovered = null, onHover = null, dims = '1024' }) {
+function EmbeddingSpace({ progress = 0, hovered = null, onHover = null, dims = '1024',
+                          candidates = [], threshold = null }) {
   const wrapRef = useRef(null);
   const [size, setSize] = useState({ w: 400, h: 400 });
   const [tick, setTick] = useState(0);
+  const [hoverTip, setHoverTip] = useState(null);
 
   useEffect(() => {
     const el = wrapRef.current;
@@ -74,6 +76,17 @@ function EmbeddingSpace({ progress = 0, hovered = null, onHover = null, dims = '
     measure();
     return () => ro.disconnect();
   }, []);
+
+  // Указатель → логическое пространство холста (как в HeteroGraph: offsetWidth —
+  // layout px, getBoundingClientRect — zoom-scaled, их отношение убирает --ui-zoom).
+  const localPt = (e) => {
+    const el = wrapRef.current;
+    if (!el) return { x: 0, y: 0 };
+    const rect = el.getBoundingClientRect();
+    const sx = rect.width ? el.offsetWidth / rect.width : 1;
+    const sy = rect.height ? el.offsetHeight / rect.height : 1;
+    return { x: (e.clientX - rect.left) * sx, y: (e.clientY - rect.top) * sy };
+  };
 
   // Re-render when graph data arrives (dispatched by api.js getGraph).
   useEffect(() => {
@@ -86,11 +99,16 @@ function EmbeddingSpace({ progress = 0, hovered = null, onHover = null, dims = '
   const rows = (graph && graph.rows) || [];
   const clusterByRow = (graph && graph.clusterByRow) || {};
 
-  const { p0, p1 } = useMemo(() => {
-    if (rows.length === 0) return { p0: {}, p1: {} };
+  const { p0, p1, edgesByRow } = useMemo(() => {
+    if (rows.length === 0) return { p0: {}, p1: {}, edgesByRow: {} };
+    const ebr = {};
+    for (const e of ((graph && graph.edges) || [])) {
+      (ebr[e.row] = ebr[e.row] || []).push(e);
+    }
     return {
       p0: buildEmbInitial(rows),
       p1: buildEmbFinal(rows, clusterByRow),
+      edgesByRow: ebr,
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rows.length, tick]);
@@ -157,9 +175,53 @@ function EmbeddingSpace({ progress = 0, hovered = null, onHover = null, dims = '
           <line key={`tr-${rid}`}
             x1={sx(p0[rid].x)} y1={sy(p0[rid].y)}
             x2={sx(p.x)} y2={sy(p.y)}
-            stroke={rid[0] === 'A' ? 'var(--row)' : 'var(--token)'}
+            stroke={rid[0] === 'A' ? 'var(--row)' : 'var(--row-b)'}
             strokeWidth="0.5" opacity={0.25 * (1 - t * 0.7)} />
         ))}
+
+        {/* pair edges — рёбра между строками, объединёнными в пары моделью.
+            Цвет относительно порога (как в окне «Проверка»): зелёный — авто-слияние,
+            жёлтый — требует проверки, серый — ниже порога (de-emphasized). */}
+        {(() => {
+          if (!(threshold > 0) || !candidates || candidates.length === 0) return null;
+          // classifyPair объявлена в screen-review.jsx (общий глобал между скриптами).
+          const classify = (typeof classifyPair === 'function')
+            ? classifyPair
+            : ((s, thr) => (s >= thr ? 'auto' : 'reject'));
+          const STYLE = {
+            auto:   { stroke: 'var(--cluster)', opacity: 0.7,  width: 1.6 },
+            review: { stroke: 'var(--warn)',    opacity: 0.8,  width: 1.6 },
+            reject: { stroke: 'var(--text-4)',  opacity: 0.1,  width: 0.8 },
+          };
+          const fade = Math.max(0, Math.min(1, (t - 0.35) / 0.45)); // появляются по мере кластеризации
+          if (fade <= 0) return null;
+          // reject рисуем первыми, авто/проверку — поверх, чтобы яркие рёбра не перекрывались
+          const order = { reject: 0, review: 1, auto: 2 };
+          const edges = candidates
+            .map((c) => {
+              const ida = `${c.a[0]}${c.a[1]}`, idb = `${c.b[0]}${c.b[1]}`;
+              const pa = pos[ida], pb = pos[idb];
+              if (!pa || !pb) return null;
+              const sim = c.sim ?? c.similarity ?? 0;
+              const verdict = classify(sim, threshold);
+              return { ida, idb, pa, pb, verdict };
+            })
+            .filter(Boolean)
+            .sort((a, b) => order[a.verdict] - order[b.verdict]);
+          return edges.map((e, i) => {
+            const st = STYLE[e.verdict];
+            const isHov = hovered === e.ida || hovered === e.idb;
+            return (
+              <line key={`pe-${i}`}
+                x1={sx(e.pa.x)} y1={sy(e.pa.y)}
+                x2={sx(e.pb.x)} y2={sy(e.pb.y)}
+                stroke={st.stroke}
+                strokeWidth={isHov ? st.width + 1 : st.width}
+                opacity={(isHov ? Math.min(1, st.opacity + 0.25) : st.opacity) * fade}
+                strokeLinecap="round" />
+            );
+          });
+        })()}
 
         {/* points */}
         {Object.entries(pos).map(([rid, p]) => {
@@ -168,22 +230,45 @@ function EmbeddingSpace({ progress = 0, hovered = null, onHover = null, dims = '
           return (
             <g key={rid}
               transform={`translate(${sx(p.x)}, ${sy(p.y)})`}
-              onMouseEnter={() => onHover && onHover(rid)}
-              onMouseLeave={() => onHover && onHover(null)}
+              onMouseEnter={(e) => {
+                onHover && onHover(rid);
+                const lp = localPt(e);
+                setHoverTip({ kind: 'row', id: rid, x: lp.x, y: lp.y });
+              }}
+              onMouseMove={(e) => {
+                const lp = localPt(e);
+                setHoverTip((h) => (h ? { ...h, x: lp.x, y: lp.y } : h));
+              }}
+              onMouseLeave={() => { onHover && onHover(null); setHoverTip(null); }}
               style={{ cursor: onHover ? 'pointer' : 'default' }}>
+              {/* увеличенная прозрачная зона захвата курсора */}
+              <circle r={9} fill="transparent" />
               <circle r={isHov ? 6 : 4}
-                fill={isA ? 'var(--row)' : 'var(--token)'}
+                fill={isA ? 'var(--row)' : 'var(--row-b)'}
                 stroke={isHov ? 'var(--text)' : 'transparent'}
                 strokeWidth={1.5} />
-              {isHov && (
-                <text x={8} y={4} fontSize="10" fontFamily="var(--font-mono)" fill="var(--text)">
-                  {rid}
-                </text>
-              )}
             </g>
           );
         })}
+
+        {/* легенда цветов рёбер — появляется вместе с парами */}
+        {(threshold > 0) && candidates && candidates.length > 0 && t > 0.4 && (
+          <g transform={`translate(${W - 132}, 14)`} fontFamily="var(--font-mono)" fontSize="9.5">
+            <rect x={-8} y={-9} width={132} height={34} rx={5}
+              fill="var(--bg-elev)" stroke="var(--border)" strokeWidth="0.75" opacity="0.92" />
+            <line x1={0} y1={1} x2={16} y2={1} stroke="var(--cluster)" strokeWidth="1.6" strokeLinecap="round" />
+            <text x={21} y={4} fill="var(--text-3)">авто-слияние</text>
+            <line x1={0} y1={15} x2={16} y2={15} stroke="var(--warn)" strokeWidth="1.6" strokeLinecap="round" />
+            <text x={21} y={18} fill="var(--text-3)">требует проверки</text>
+          </g>
+        )}
       </svg>
+
+      {/* описание строки при наведении — тот же тултип, что и в графе */}
+      {hoverTip && typeof HoverTooltip === 'function' && (
+        <HoverTooltip tip={hoverTip} graph={graph} canvasW={W} canvasH={H}
+                      edgesByRow={edgesByRow} edgesByToken={{}} />
+      )}
     </div>
   );
 }

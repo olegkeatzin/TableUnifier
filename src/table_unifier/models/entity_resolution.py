@@ -185,8 +185,14 @@ class EntityResolutionGAT(nn.Module):
             nn.Linear(hidden_dim, output_dim),
         )
 
-    def forward(self, data: HeteroData) -> torch.Tensor:
-        """Returns: L2-нормализованные эмбеддинги строк [N_rows, output_dim]."""
+    def forward(self, data: HeteroData, return_attention: bool = False):
+        """Returns: L2-нормализованные эмбеддинги строк [N_rows, output_dim].
+
+        Если return_attention=True — возвращает (output, attentions), где
+        attentions — список тензоров [num_edges, num_heads] по одному на GAT-слой
+        (коэффициенты внимания token→row). Используется сервером для отрисовки
+        толщины рёбер графа по силе внимания.
+        """
         if self.use_input_projection:
             row_x = self.row_proj(data["row"].x)
             token_x = self.token_proj(data["token"].x)
@@ -205,15 +211,27 @@ class EntityResolutionGAT(nn.Module):
         t2r_edge_index = data["token", "in_row", "row"].edge_index.long()
         r2t_edge_index = data["row", "has_token", "token"].edge_index.long()
 
+        attentions: list[torch.Tensor] = []
         for layer in self.gnn_layers:
-            row_x, token_x = layer(
-                row_x, token_x,
-                t2r_edge_index, edge_attr_t2r,
-                r2t_edge_index, edge_attr_r2t,
-            )
+            if return_attention:
+                row_x, token_x, attn = layer(
+                    row_x, token_x,
+                    t2r_edge_index, edge_attr_t2r,
+                    r2t_edge_index, edge_attr_r2t,
+                    return_attention=True,
+                )
+                attentions.append(attn)
+            else:
+                row_x, token_x = layer(
+                    row_x, token_x,
+                    t2r_edge_index, edge_attr_t2r,
+                    r2t_edge_index, edge_attr_r2t,
+                )
 
         output = self.output_head(row_x)
         output = F.normalize(output, p=2, dim=-1)
+        if return_attention:
+            return output, attentions
         return output
 
 

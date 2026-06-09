@@ -5,7 +5,7 @@ function inferenceIsDone() {
   return ((window.__DATA__ && window.__DATA__.candidates) || []).length > 0;
 }
 
-function ScreenTraining({ onContinue, onBack }) {
+function ScreenTraining({ onContinue, onBack, threshold }) {
   const _done = inferenceIsDone();
   const [phase, setPhase] = useState(_done ? 'done' : 'idle');
   const [progress, setProgress] = useState(0);
@@ -141,12 +141,18 @@ function ScreenTraining({ onContinue, onBack }) {
   const graphMemMb = metrics.graph_mem_mb ??
     (typeof metrics.graph_bytes === 'number' ? metrics.graph_bytes / 1048576 : undefined);
 
+  // Эффективный порог: значение слайдера из окна «Проверка» (App-state), а пока
+  // пользователь его не трогал — дефолт из инференса. Управляет и гистограммой,
+  // и цветом рёбер «найденных пар» в пространстве эмбеддингов.
+  const effThreshold = (typeof threshold === 'number') ? threshold : (metrics.threshold ?? 0.831);
+  const candidates = window.__DATA__.candidates || [];
+
   return (
     <div className="screen">
       <div className="screen-header">
         <div>
           <h1>Инференс модели</h1>
-          <p>Прямой проход предобученной GAT по гетерографу. Слева — структура гетерографа: узлы строк и токенов, толщина рёбер = вес внимания. Справа — UMAP-проекция эмбеддингов строк.</p>
+          <p>Прямой проход предобученной GAT по гетерографу. Слева — структура гетерографа: узлы строк и токенов, толщина рёбер = вес внимания. Справа — UMAP-проекция эмбеддингов строк; рёбра соединяют найденные пары (зелёные — авто-слияние, жёлтые — на проверку, цвет зависит от порога из окна «Проверка»).</p>
         </div>
         <div className="actions">
           <button className="btn ghost" onClick={() => startInference(true)}>↻ перезапустить</button>
@@ -187,9 +193,10 @@ function ScreenTraining({ onContinue, onBack }) {
           )}
           {(activeTab === 'embed' || activeTab === 'split') && (
             <div style={{ display: 'flex', flexDirection: 'column', position: 'relative', minHeight: 0, overflow: 'hidden' }}>
-              <ViewLabel title="Пространство эмбеддингов" subtitle="UMAP · 1024 → 2" />
+              <ViewLabel title="Пространство эмбеддингов" subtitle="UMAP · 1024 → 2 · рёбра = найденные пары" />
               <div style={{ flex: 1, minHeight: 0, padding: '14px 16px 16px' }}>
-                <EmbeddingSpace progress={graphProgress} hovered={hovered} onHover={setHovered} dims="1024" />
+                <EmbeddingSpace progress={graphProgress} hovered={hovered} onHover={setHovered}
+                  dims="1024" candidates={candidates} threshold={effThreshold} />
               </div>
             </div>
           )}
@@ -275,7 +282,7 @@ function ScreenTraining({ onContinue, onBack }) {
               gridTemplateColumns: phase === 'done' ? 'minmax(240px, 1fr) auto auto' : '1fr 360px',
               gap: 24, alignItems: 'start',
             }}>
-              <SimHistogram phase={phase} bins={window.__DATA__.histogram} threshold={metrics.threshold} />
+              <SimHistogram phase={phase} bins={window.__DATA__.histogram} threshold={effThreshold} />
 
               {phase === 'done' ? (
                 <React.Fragment>

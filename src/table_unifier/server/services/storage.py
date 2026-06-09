@@ -54,6 +54,9 @@ class RunState:
     # Инференс.
     row_embeddings: Any = None  # torch.Tensor [N, D]
     similarity_matrix: Any = None  # [N_a, N_b]
+    # Внимание GAT на рёбрах token→row, агрегированное по головам и слоям.
+    # np.ndarray [n_edges], выровнено с graph["token","in_row","row"].edge_index.
+    edge_attention: Any = None
     candidates: list[dict] = field(default_factory=list)
     clusters: list[dict] = field(default_factory=list)
     metrics: dict[str, Any] = field(default_factory=dict)

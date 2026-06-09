@@ -362,6 +362,24 @@ def _load_checkpoint(checkpoint: str, graph) -> EntityResolutionGAT:
     return model
 
 
+def _aggregate_edge_attention(attentions: list) -> np.ndarray | None:
+    """Сводит attention со всех GAT-слоёв к одному скаляру на ребро.
+
+    attentions — список тензоров [n_edges, num_heads] (token→row, по слою).
+    Возвращает np.ndarray [n_edges] = mean по головам, затем mean по слоям,
+    либо None если внимание недоступно.
+    """
+    try:
+        per_layer = [a.mean(dim=1) for a in attentions if a is not None]
+        if not per_layer:
+            return None
+        stacked = torch.stack(per_layer, dim=0)  # [n_layers, n_edges]
+        return stacked.mean(dim=0).cpu().numpy()
+    except Exception as e:  # noqa: BLE001 — внимание не критично для инференса
+        logger.warning("attention aggregation failed: %s", e)
+        return None
+
+
 def _connected_components(sim: np.ndarray, threshold: float,
                           n_a: int, n_b: int) -> tuple[list[int], list[int]]:
     """Union-find по cross-edges sim >= thr. Возвращает (labels_a, labels_b)."""
@@ -455,8 +473,13 @@ def run_inference(run_id: str, *,
         _publish(run_id, {"type": "progress", "phase": "l1", "progress": 0.0})
         t0 = time.time()
         with torch.no_grad():
-            row_embeddings = model(graph).cpu()
+            row_embeddings_dev, attentions = model(graph, return_attention=True)
+            row_embeddings = row_embeddings_dev.cpu()
         forward_ms = (time.time() - t0) * 1000
+
+        # Агрегируем внимание token→row: среднее по головам, затем по GAT-слоям.
+        # Даёт по одному скаляру на ребро → толщина рёбер графа на фронте.
+        run.edge_attention = _aggregate_edge_attention(attentions)
         _publish(run_id, {"type": "progress", "phase": "l1", "progress": 1.0})
         _publish(run_id, {"type": "phase", "phase": "l2",
                           "label": "GATv2Conv[1] · row→token"})
